@@ -6,7 +6,7 @@ For instance I've offloaded QVK matmul to Phi, but have no Idea how to go furthe
 
 `offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)`
 
-Resbi 2025-01-29 UTC+8
+Resbi 2025-01-31 UTC+8
 
 ## llama2.c
 
