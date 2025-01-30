@@ -284,8 +284,10 @@ void qkv_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int kv_d
     float *wk_t = wk + l*dim*kv_dim;
     float *wv = w->wv;
     float *wv_t = wv + l*dim*kv_dim;
-
-    #pragma offload target(mic) \
+	
+	char* sig; 
+    //printf("Offloading QKV matmuls to MIC\n");
+    #pragma offload target(mic:0) signal(sig) \
         in(xb:length(dim)) \
         in(wq_t:length(dim*dim)) \
         in(wk_t:length(dim*kv_dim)) \
@@ -298,9 +300,35 @@ void qkv_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int kv_d
         matmul(k, xb, wk_t, dim, kv_dim);
         matmul(v, xb, wv_t, dim, kv_dim);
     }
+    #pragma offload_wait target(mic:0) wait(sig)
+}
+
+void ffn_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int hidden_dim) {
+    float* hb = s->hb;
+    float* hb2 = s->hb2;
+    float* xb = s->xb;
+    float* w1 = w->w1;
+    float* w3 = w->w3;
+    float* w1_t = w1 + l*dim*hidden_dim;
+    float* w3_t = w3 + l*dim*hidden_dim;
+    char* sig;  
+
+    //printf("Offloading FFN matmuls to MIC\n");
+    #pragma offload target(mic:0) signal(sig) \
+        in(xb:length(dim)) \
+        in(w1_t:length(dim*hidden_dim)) \
+        in(w3_t:length(dim*hidden_dim)) \
+        out(hb:length(dim)) \
+        out(hb2:length(dim))
+    {
+        matmul(hb, xb, w1_t, dim, hidden_dim);
+        matmul(hb2, xb, w3_t, dim, hidden_dim);
+    }
+    #pragma offload_wait target(mic:0) wait(sig)
 }
 
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+    //char* sig; 
     #pragma offload target(mic) \
         in(x:length(n)) \
         in(w:length(d*n)) \
@@ -308,6 +336,7 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
     {
         matmul(xout, x, w, n, d);
     }
+    //#pragma offload_wait target(mic:0) wait(sig)
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -438,21 +467,11 @@ float* forward(Transformer* transformer, int token, int pos) {
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
+        
+        //printf("Offloading FFN matmuls to MIC\n");
         /*
-        printf("Offloading FFN matmuls to MIC\n");
         #ifdef OFFLOAD
-            xout_temp = s->hb;
-            x_temp = s->xb;
-            w_temp = w->w1 + l*dim*hidden_dim;  
-            n_temp = dim;
-            d_temp = hidden_dim;
-            matmul_mic(xout_temp, x_temp, w_temp, n_temp, d_temp);
-            xout_temp = s->hb2;
-            x_temp = s->xb;
-            w_temp = w->w3 + l*dim*hidden_dim;
-            n_temp = dim;
-            d_temp = hidden_dim;
-            matmul_mic(xout_temp, x_temp, w_temp, n_temp, d_temp);
+            ffn_matmul_mic(s, w, l, dim, hidden_dim);
         #else
             matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
             matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
