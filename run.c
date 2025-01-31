@@ -19,7 +19,7 @@
 #include <omp.h>
 #include <time.h>
 
-#define ALIGNMENT 32
+#define ALIGNMENT 64
 #define OFFLOAD 1
 
 // ----------------------------------------------------------------------------
@@ -188,7 +188,6 @@ void free_transformer(Transformer* t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
-TARGET_ATTRIBUTE // MIC attribute
 void rmsnorm(float* o, float* x, float* weight, int size) {
     float ss = 0.0f;
     // Calculate sum of squares with vectorization
@@ -204,7 +203,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     
     // Normalize and scale with vectorization
     //#pragma omp parallel for simd
-    //#pragma omp simd
+    #pragma omp simd
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
@@ -212,6 +211,28 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
 }
 
 TARGET_ATTRIBUTE // MIC attribute
+void rmsnorm_mic(float* o, float* x, float* weight, int size) {
+    float ss = 0.0f;
+    // Calculate sum of squares with vectorization
+    #pragma omp parallel for simd reduction(+:ss)
+    for (int j = 0; j < size; j++) {
+        ss += x[j] * x[j];
+    }
+    //#pragma omp barrier
+
+    ss /= size;
+    ss += 1e-5f;
+    ss = 1.0f / sqrtf(ss);
+    
+    // Normalize and scale with vectorization
+    #pragma omp parallel for simd
+    //#pragma omp simd
+    for (int j = 0; j < size; j++) {
+        o[j] = weight[j] * (ss * x[j]);
+    }
+    //#pragma omp barrier
+}
+
 void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
@@ -230,8 +251,35 @@ void softmax(float* x, int size) {
     //#pragma omp barrier
 
     // normalize
-    // #pragma omp parallel for simd schedule(static)
+    //#pragma omp parallel for simd schedule(static)
     #pragma omp simd
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
+    // #pragma omp barrier
+}
+
+TARGET_ATTRIBUTE // MIC attribute
+void softmax_mic(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    #pragma omp parallel for reduction(+:sum)
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    //#pragma omp barrier
+
+    // normalize
+    #pragma omp parallel for simd 
+    //#pragma omp simd
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
@@ -242,7 +290,7 @@ void softmax(float* x, int size) {
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for
     for (int i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -257,7 +305,7 @@ TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for 
     for (int i = 0; i < d; i++) {
         float val = 0.0f;
         #pragma omp simd
@@ -284,6 +332,7 @@ void forward_alloc(Transformer* transformer) {
     int p_n_layers = p->n_layers; 
     int p_seq_len = p->seq_len;
     int p_n_heads = p->n_heads;
+    int p_n_kv_heads = p->n_kv_heads;
     int p_dim = p->dim; 
     int p_vocab_size = p->vocab_size;
     float *w_rms_att_weight = w->rms_att_weight;
@@ -313,7 +362,7 @@ void forward_alloc(Transformer* transformer) {
 
     #pragma offload target(mic : 0) signal(sign) \
         nocopy(x:length(dim) alloc_if(1) free_if(0)) \
-        nocopy(w_rms_att_weight:length(p_n_layers*dim) alloc_if(1) free_if(0)) \
+        nocopy(w_rms_att_weight:length(p_n_layers * dim) alloc_if(1) free_if(0)) \
         nocopy(w_wq:length(p_n_layers*dim*dim) alloc_if(1) free_if(0)) \
         nocopy(w_wk:length(p_n_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
         nocopy(w_wv:length(p_n_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
@@ -325,13 +374,13 @@ void forward_alloc(Transformer* transformer) {
         nocopy(w_rms_final_weight:length(dim) alloc_if(1) free_if(0)) \
         nocopy(w_wcls:length(dim*p_vocab_size) alloc_if(1) free_if(0)) \
         nocopy(s_q:length(dim) alloc_if(1) free_if(0)) \
-        nocopy(s_key_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(1) free_if(0)) \
-        nocopy(s_value_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(1) free_if(0)) \
+        nocopy(s_key_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(1) free_if(0)) \
+        nocopy(s_value_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(1) free_if(0)) \
         nocopy(s_xb:length(dim) alloc_if(1) free_if(0)) \
         nocopy(s_xb2:length(dim) alloc_if(1) free_if(0)) \
         nocopy(s_hb:length(hidden_dim) alloc_if(1) free_if(0)) \
         nocopy(s_hb2:length(hidden_dim) alloc_if(1) free_if(0)) \
-        nocopy(s_att:length(p_seq_len) alloc_if(1) free_if(0)) \
+        nocopy(s_att:length(p_n_heads * p_seq_len) alloc_if(1) free_if(0)) \
         nocopy(s_logits:length(p_vocab_size) alloc_if(1) free_if(0)) 
     {}
     #pragma offload_wait target(mic : 0) wait(sign)
@@ -353,6 +402,7 @@ void forward_free(Transformer* transformer) {
     int p_n_layers = p->n_layers; 
     int p_seq_len = p->seq_len;
     int p_n_heads = p->n_heads;
+    int p_n_kv_heads = p->n_kv_heads;
     int p_dim = p->dim; 
     int p_vocab_size = p->vocab_size;
     float *w_rms_att_weight = w->rms_att_weight;
@@ -394,13 +444,13 @@ void forward_free(Transformer* transformer) {
         nocopy(w_rms_final_weight:length(dim) alloc_if(0) free_if(1)) \
         nocopy(w_wcls:length(dim*p_vocab_size) alloc_if(0) free_if(1)) \
         nocopy(s_q:length(dim) alloc_if(0) free_if(1)) \
-        nocopy(s_key_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(0) free_if(1)) \
-        nocopy(s_value_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(0) free_if(1)) \
+        nocopy(s_key_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(0) free_if(1)) \
+        nocopy(s_value_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(0) free_if(1)) \
         nocopy(s_xb:length(dim) alloc_if(0) free_if(1)) \
         nocopy(s_xb2:length(dim) alloc_if(0) free_if(1)) \
         nocopy(s_hb:length(hidden_dim) alloc_if(0) free_if(1)) \
         nocopy(s_hb2:length(hidden_dim) alloc_if(0) free_if(1)) \
-        nocopy(s_att:length(p_seq_len) alloc_if(0) free_if(1)) \
+        nocopy(s_att:length(p_n_heads * p_seq_len) alloc_if(0) free_if(1)) \
         nocopy(s_logits:length(p_vocab_size) alloc_if(0) free_if(1)) 
     {}
     #pragma offload_wait target(mic : 0) wait(sign)
@@ -424,6 +474,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 
     int p_n_layers = p->n_layers; 
     int p_seq_len = p->seq_len;
+    int p_n_kv_heads = p->n_kv_heads;
     int p_n_heads = p->n_heads;
     int p_dim = p->dim; 
     int p_vocab_size = p->vocab_size;
@@ -451,7 +502,7 @@ float* forward(Transformer* transformer, int token, int pos) {
     //printf("Offloading to MIC\n");
     char *sign;
 
-    #pragma offload target(mic : 0) signal(sign) \
+    #pragma offload target(mic : 0) \
         in(dim) \
         in(kv_dim) \
         in(kv_mul) \
@@ -475,19 +526,19 @@ float* forward(Transformer* transformer, int token, int pos) {
         in(w_rms_final_weight:length(dim) alloc_if(0) free_if(0)) \
         in(w_wcls:length(dim*p_vocab_size) alloc_if(0) free_if(0)) \
         inout(s_q:length(dim) alloc_if(0) free_if(0)) \
-        inout(s_key_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(0) free_if(0)) \
-        inout(s_value_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(0) free_if(0)) \
+        inout(s_key_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(0) free_if(0)) \
+        inout(s_value_cache:length(p_n_layers * p_seq_len * (p_dim * p_n_kv_heads) / p_n_heads) alloc_if(0) free_if(0)) \
         inout(s_xb:length(dim) alloc_if(0) free_if(0)) \
         inout(s_xb2:length(dim) alloc_if(0) free_if(0)) \
         inout(s_hb:length(hidden_dim) alloc_if(0) free_if(0)) \
         inout(s_hb2:length(hidden_dim) alloc_if(0) free_if(0)) \
-        inout(s_att:length(p_seq_len) alloc_if(0) free_if(0)) \
+        inout(s_att:length(p_n_heads * p_seq_len) alloc_if(0) free_if(0)) \
         out(s_logits:length(p_vocab_size) alloc_if(0) free_if(0)) 
     {
         for(unsigned long long l = 0; l < p_n_layers; l++) {
 
             // attention rmsnorm
-            rmsnorm(s_xb, x, w_rms_att_weight + l*dim, dim);
+            rmsnorm_mic(s_xb, x, w_rms_att_weight + l*dim, dim);
 
             // key and value point to the kv cache
             int loff = l * p_seq_len * kv_dim; // kv cache layer offset for convenience
@@ -500,24 +551,34 @@ float* forward(Transformer* transformer, int token, int pos) {
             matmul_mic(s_v, s_xb, w_wv + l*dim*kv_dim, dim, kv_dim);
 
             // RoPE relative positional encoding: complex-valued rotate q and k in each head
-            for (int i = 0; i < dim; i+=2) {
+            #pragma omp parallel for simd
+            for (int i = 0; i < kv_dim; i+=2) {
                 int head_dim = i % head_size;
                 float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
                 float val = pos * freq;
                 float fcr = cosf(val);
                 float fci = sinf(val);
-                int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-                for (int v = 0; v < rotn; v++) {
-                    float* vec = v == 0 ? s_q : s_k; // the vector to rotate (query or key)
-                    float v0 = vec[i];
-                    float v1 = vec[i+1];
-                    vec[i]   = v0 * fcr - v1 * fci;
-                    vec[i+1] = v0 * fci + v1 * fcr;
-                }
+
+                s_q[i]   = s_q[i] * fcr - s_q[i+1] * fci;
+                s_q[i+1] = s_q[i] * fci + s_q[i+1] * fcr;
+                s_k[i]   = s_k[i] * fcr - s_k[i+1] * fci;
+                s_k[i+1] = s_k[i] * fci + s_k[i+1] * fcr;
+            }
+
+            #pragma omp parallel for simd
+            for (int i = kv_dim; i < dim; i+=2) {
+                int head_dim = i % head_size;
+                float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
+                float val = pos * freq;
+                float fcr = cosf(val);
+                float fci = sinf(val);
+
+                s_q[i]   = s_q[i] * fcr - s_q[i+1] * fci;
+                s_q[i+1] = s_q[i] * fci + s_q[i+1] * fcr;
             }
 
             // multihead attention. iterate over all heads
-            #pragma omp parallel for schedule(static)
+            #pragma omp parallel for
             for (int h = 0; h < p_n_heads; h++) {
                 // get the query vector for this head
                 float* q = s_q + h * head_size;
@@ -538,7 +599,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 }
 
                 // softmax the scores to get attention weights, from 0..pos inclusively
-                softmax(att, pos + 1);
+                softmax_mic(att, pos + 1);
 
                 // weighted sum of the values, store back into xb
                 float* xb = s_xb + h * head_size;
@@ -554,7 +615,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                     }
                 }
             }
-            #pragma omp barrier
+            //#pragma omp barrier
 
             // final matmul to get the output of the attention
             matmul_mic(s_xb2, s_xb, w_wo + l*dim*dim, dim, dim);
@@ -564,10 +625,10 @@ float* forward(Transformer* transformer, int token, int pos) {
             for (int i = 0; i < dim; i++) {
                 x[i] += s_xb2[i];
             }
-            #pragma omp barrier
+            //#pragma omp barrier
 
             // ffn rmsnorm
-            rmsnorm(s_xb, x, w_rms_ffn_weight + l*dim, dim);
+            rmsnorm_mic(s_xb, x, w_rms_ffn_weight + l*dim, dim);
 
             // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
             // first calculate self.w1(x) and self.w3(x)
@@ -584,7 +645,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 val *= s_hb2[i];
                 s_hb[i] = val;
             }
-            #pragma omp barrier
+            //#pragma omp barrier
 
             // final matmul to get the output of the ffn
             matmul_mic(s_xb, s_hb, w_w2 + l*dim*hidden_dim, hidden_dim, dim);
@@ -594,16 +655,16 @@ float* forward(Transformer* transformer, int token, int pos) {
             for (int i = 0; i < dim; i++) {
                 x[i] += s_xb[i];
             }
-            #pragma omp barrier
+            //#pragma omp barrier
         }
 
         // final rmsnorm
-        rmsnorm(x, x, w_rms_final_weight, dim);
+        rmsnorm_mic(x, x, w_rms_final_weight, dim);
 
         // classifier into logits
         matmul_mic(s_logits, x, w_wcls, p_dim, p_vocab_size);
     }
-    #pragma offload_wait target(mic : 0) wait(sign)
+    //#pragma offload_wait target(mic : 0) wait(sign)
     // forward all the layers
     return s_logits;
 }
