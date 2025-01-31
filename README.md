@@ -6,9 +6,9 @@
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
 
-Now it works well, but sometimes it crashes when it still outputting tokens. I don't know why, but I'm gonna fix it in the future.
+Now it works very well.
 
-Resbi 2025-01-31 UTC+8
+Resbi 2025-02-01 UTC+8
 
 ## llama2.c
 
