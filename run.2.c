@@ -1,5 +1,6 @@
 /* Inference for Llama-2 Transformer model in pure C */
 
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -18,6 +19,7 @@
 #include <omp.h>
 #include <time.h>
 
+#define ALIGNMENT 32
 #define OFFLOAD 1
 
 // ----------------------------------------------------------------------------
@@ -82,16 +84,17 @@ typedef struct {
 } Transformer;
 
 void malloc_run_state(RunState* s, Config* p) {
-    s->x = calloc(p->dim, sizeof(float));
-    s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
-    s->hb = calloc(p->hidden_dim, sizeof(float));
-    s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->q = calloc(p->dim, sizeof(float));
-    s->key_cache = calloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads, sizeof(float));
-    s->value_cache = calloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads, sizeof(float));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    s->logits = calloc(p->vocab_size, sizeof(float));
+    s->x = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->xb = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->xb2 = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->hb = (float*)_mm_malloc(p->hidden_dim * sizeof(float), ALIGNMENT);
+    s->hb2 = (float*)_mm_malloc(p->hidden_dim * sizeof(float), ALIGNMENT);
+    s->q = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->key_cache = (float*)_mm_malloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads * sizeof(float), ALIGNMENT);
+    s->value_cache = (float*)_mm_malloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads * sizeof(float), ALIGNMENT);
+    s->att = (float*)_mm_malloc(p->n_heads * p->seq_len * sizeof(float), ALIGNMENT);
+    s->logits = (float*)_mm_malloc(p->vocab_size * sizeof(float), ALIGNMENT);
+
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
      || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
@@ -101,16 +104,17 @@ void malloc_run_state(RunState* s, Config* p) {
 }
 
 void free_run_state(RunState* s) {
-    free(s->x);
-    free(s->xb);
-    free(s->xb2);
-    free(s->hb);
-    free(s->hb2);
-    free(s->q);
-    free(s->att);
-    free(s->logits);
-    free(s->key_cache);
-    free(s->value_cache);
+    _mm_free(s->x);
+    _mm_free(s->xb);
+    _mm_free(s->xb2);
+    _mm_free(s->hb);
+    _mm_free(s->hb2);
+    _mm_free(s->q);
+    _mm_free(s->att);
+    _mm_free(s->logits);
+    _mm_free(s->key_cache);
+    _mm_free(s->value_cache);
+
 }
 
 void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared_weights) {
@@ -188,19 +192,22 @@ TARGET_ATTRIBUTE // MIC attribute
 void rmsnorm(float* o, float* x, float* weight, int size) {
     float ss = 0.0f;
     // Calculate sum of squares with vectorization
-    #pragma omp parallel for simd reduction(+:ss)
+    //#pragma omp parallel for simd reduction(+:ss)
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
     }
+    //#pragma omp barrier
+
     ss /= size;
     ss += 1e-5f;
     ss = 1.0f / sqrtf(ss);
     
     // Normalize and scale with vectorization
-    #pragma omp parallel for simd
+    //#pragma omp parallel for simd
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
+    //#pragma omp barrier
 }
 
 TARGET_ATTRIBUTE // MIC attribute
@@ -214,255 +221,51 @@ void softmax(float* x, int size) {
     }
     // exp and sum
     float sum = 0.0f;
-    #pragma omp parallel for reduction(+:sum)
+    //#pragma omp parallel for reduction(+:sum)
     for (int i = 0; i < size; i++) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
+    //#pragma omp barrier
+
     // normalize
-    #pragma omp parallel for
+    //#pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
+    //#pragma omp barrier
 }
 
-#ifndef OFFLOAD
+
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    const int block_size = 128;  // Output blocking for L1 cache
-    
-    #pragma omp parallel for 
-    for (int i = 0; i < d; i += block_size) {
-        const int imax = (i + block_size < d) ? i + block_size : d;
-        
-        #pragma vector aligned
-        #pragma simd
-        for (int ib = i; ib < imax; ib++) {
-            float val = 0.0f;
-            #pragma vector aligned
-            #pragma simd reduction(+:val)
-            for (int j = 0; j < n; j++) {
-                val += w[ib * n + j] * x[j];
-            }
-            xout[ib] = val;
+    // by far the most amount of time is spent inside this little function
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
         }
+        xout[i] = val;
     }
+    #pragma omp barrier
 }
-#else
+
 TARGET_ATTRIBUTE // MIC attribute
-void matmul(float* xout, float* x, float* w, int n, int d) {
-    // W (d,n) @ x (n,) -> xout (d,)
-    const int block_size = 128;  // Output blocking for L1 cache
-    
-    #pragma omp parallel for 
-    for (int i = 0; i < d; i += block_size) {
-        const int imax = (i + block_size < d) ? i + block_size : d;
-        
-        #pragma vector aligned
-        #pragma simd
-        for (int ib = i; ib < imax; ib++) {
-            float val = 0.0f;
-            #pragma vector aligned
-            #pragma simd reduction(+:val)
-            for (int j = 0; j < n; j++) {
-                val += w[ib * n + j] * x[j];
-            }
-            xout[ib] = val;
-        }
-    }
-}
-#endif
-
-// Function to offload the QKV matmuls to MIC
-void qkv_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int kv_dim) {
-	float *q = s->q;
-	float *k = s->k; 
-	float *v = s->v;
-    float *xb = s->xb;
-    float *wq = w->wq;
-    float *wq_t = wq + l*dim*dim;
-    float *wk = w->wk;
-    float *wk_t = wk + l*dim*kv_dim;
-    float *wv = w->wv;
-    float *wv_t = wv + l*dim*kv_dim;
-
-    #pragma offload target(mic) \
-        in(xb:length(dim)) \
-        in(wq_t:length(dim*dim)) \
-        in(wk_t:length(dim*kv_dim)) \
-        in(wv_t:length(dim*kv_dim)) \
-        out(q:length(dim)) \
-        out(k:length(kv_dim)) \
-        out(v:length(kv_dim))
-    {
-        matmul(q, xb, wq_t, dim, dim);
-        matmul(k, xb, wk_t, dim, kv_dim);
-        matmul(v, xb, wv_t, dim, kv_dim);
-    }
-}
-
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
-    #pragma offload target(mic) \
-        in(x:length(n)) \
-        in(w:length(d*n)) \
-        out(xout:length(d))
-    {
-        matmul(xout, x, w, n, d);
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
     }
-}
-
-TARGET_ATTRIBUTE // MIC attribute
-void forward_mic(
-    int token,
-    int pos,
-    float *x,
-    int dim,
-    int kv_dim,
-    int kv_mul,
-    int hidden_dim,
-    int head_size,
-    int p_n_layers,
-    int p_seq_len,
-    int p_n_heads,
-    int p_dim, 
-    int p_vocab_size,
-    float *w_rms_att_weight,
-    float *w_wq,
-    float *w_wk,
-    float *w_wv,
-    float *w_wo, 
-    float *w_rms_ffn_weight,
-    float *w_w1,
-    float *w_w2,
-    float *w_w3,
-    float *w_rms_final_weight,
-    float *w_wcls, 
-    float *s_xb,
-    float *s_xb2,
-    float *s_hb,
-    float *s_hb2,
-    float *s_q,
-    float *s_k,
-    float *s_v,
-    float *s_att,
-    float *s_key_cache,
-    float *s_value_cache, 
-    float *s_logits
-) {
-    
-    printf("Phi!");
-    for(unsigned long long l = 0; l < p_n_layers; l++) {
-
-        // attention rmsnorm
-        rmsnorm(s_xb, x, w_rms_att_weight + l*dim, dim);
-
-        // key and value point to the kv cache
-        int loff = l * p_seq_len * kv_dim; // kv cache layer offset for convenience
-        s_k = s_key_cache + loff + pos * kv_dim;
-        s_v = s_value_cache + loff + pos * kv_dim;
-
-        // qkv matmuls for this position
-        matmul(s_q, s_xb, w_wq + l*dim*dim, dim, dim);
-        matmul(s_k, s_xb, w_wk + l*dim*kv_dim, dim, kv_dim);
-        matmul(s_v, s_xb, w_wv + l*dim*kv_dim, dim, kv_dim);
-
-        // RoPE relative positional encoding: complex-valued rotate q and k in each head
-        for (int i = 0; i < dim; i+=2) {
-            int head_dim = i % head_size;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++) {
-                float* vec = v == 0 ? s_q : s_k; // the vector to rotate (query or key)
-                float v0 = vec[i];
-                float v1 = vec[i+1];
-                vec[i]   = v0 * fcr - v1 * fci;
-                vec[i+1] = v0 * fci + v1 * fcr;
-            }
-        }
-
-        // multihead attention. iterate over all heads
-        int h;
-        #pragma omp parallel for private(h)
-        for (h = 0; h < p_n_heads; h++) {
-            // get the query vector for this head
-            float* q = s_q + h * head_size;
-            // attention scores for this head
-            float* att = s_att + h * p_seq_len;
-            // iterate over all timesteps, including the current one
-            for (int t = 0; t <= pos; t++) {
-                // get the key vector for this head and at this timestep
-                float* k = s_key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // calculate the attention score as the dot product of q and k
-                float score = 0.0f;
-                for (int i = 0; i < head_size; i++) {
-                    score += q[i] * k[i];
-                }
-                score /= sqrtf(head_size);
-                // save the score to the attention buffer
-                att[t] = score;
-            }
-
-            // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(att, pos + 1);
-
-            // weighted sum of the values, store back into xb
-            float* xb = s_xb + h * head_size;
-            memset(xb, 0, head_size * sizeof(float));
-            for (int t = 0; t <= pos; t++) {
-                // get the value vector for this head and at this timestep
-                float* v = s_value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // get the attention weight for this timestep
-                float a = att[t];
-                // accumulate the weighted value into xb
-                for (int i = 0; i < head_size; i++) {
-                    xb[i] += a * v[i];
-                }
-            }
-        }
-
-        // final matmul to get the output of the attention
-        matmul(s_xb2, s_xb, w_wo + l*dim*dim, dim, dim);
-
-        // residual connection back into x
-        for (int i = 0; i < dim; i++) {
-            x[i] += s_xb2[i];
-        }
-
-        // ffn rmsnorm
-        rmsnorm(s_xb, x, w_rms_ffn_weight + l*dim, dim);
-
-        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-        // first calculate self.w1(x) and self.w3(x)
-        matmul(s_hb, s_xb, w_w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s_hb2, s_xb, w_w3 + l*dim*hidden_dim, dim, hidden_dim);
-    
-        // SwiGLU non-linearity
-        for (int i = 0; i < hidden_dim; i++) {
-            float val = s_hb[i];
-            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-            val *= (1.0f / (1.0f + expf(-val)));
-            // elementwise multiply with w3(x)
-            val *= s_hb2[i];
-            s_hb[i] = val;
-        }
-
-        // final matmul to get the output of the ffn
-        matmul(s_xb, s_hb, w_w2 + l*dim*hidden_dim, hidden_dim, dim);
-
-        // residual connection
-        for (int i = 0; i < dim; i++) {
-            x[i] += s_xb[i];
-        }
-    }
-
-    // final rmsnorm
-    rmsnorm(x, x, w_rms_final_weight, dim);
-
-    // classifier into logits
-    matmul(s_logits, x, w_wcls, p_dim, p_vocab_size);
+    //#pragma omp barrier
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -477,12 +280,11 @@ float* forward(Transformer* transformer, int token, int pos) {
     int kv_mul = p->n_heads / p->n_kv_heads; // integer multiplier of the kv sharing in multiquery
     int hidden_dim =  p->hidden_dim;
     int head_size = dim / p->n_heads;
-
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
-    memcpy(x, content_row, dim*sizeof(*x));
+    memcpy(x, content_row, dim*sizeof(float));
 
-    #ifdef OFFLOAD
+
     int p_n_layers = p->n_layers; 
     int p_seq_len = p->seq_len;
     int p_n_heads = p->n_heads;
@@ -499,213 +301,169 @@ float* forward(Transformer* transformer, int token, int pos) {
     float *w_w3 = w->w3;
     float *w_rms_final_weight = w->rms_final_weight;
     float *w_wcls = w->wcls; 
-    float *s_xb = s->xb;
-    float *s_xb2 = s->xb2;
-    float *s_hb = s->hb;
-    float *s_hb2 = s->hb2;
-    float *s_q = s->q;
-    float *s_k = s->k;
-    float *s_v = s->v;
-    float *s_att = s->att;
-    float *s_key_cache = s->key_cache;
-    float *s_value_cache = s->value_cache; 
     float *s_logits = s->logits;
-    printf("Offloading forward to MIC\n");
+
+    //printf("Offloading to MIC\n");
+
     #pragma offload target(mic) \
-		in(token) \
-        in(pos) \
-        inout(x:length(dim)) \
-        in(dim) \
-        in(kv_dim) \
-        in(kv_mul) \
-        in(hidden_dim) \
-        in(head_size) \
-        in(p_n_layers) \
-        in(p_seq_len) \
-        in(p_n_heads) \
-        in(p_dim) \
-        in(p_vocab_size) \
-        in(w_rms_att_weight:length(p_n_layers*dim)) \
-        in(w_wq:length(p_n_layers*dim*dim)) \
-        in(w_wk:length(p_n_layers*dim*kv_dim)) \
-        in(w_wv:length(p_n_layers*dim*kv_dim)) \
-        in(w_wo:length(p_n_layers*dim*dim)) \
-        in(w_rms_ffn_weight:length(p_n_layers*dim)) \
-        in(w_w1:length(p_n_layers*dim*hidden_dim)) \
-        in(w_w2:length(p_n_layers*dim*hidden_dim)) \
-        in(w_w3:length(p_n_layers*dim*hidden_dim)) \
-        in(w_rms_final_weight:length(dim)) \
-        in(w_wcls:length(dim*p_vocab_size)) \
-        inout(s_xb:length(dim) alloc_if(1) free_if(1)) \
-        inout(s_xb2:length(dim) alloc_if(1) free_if(1)) \
-        inout(s_hb:length(dim) alloc_if(1) free_if(1)) \
-        inout(s_hb2:length(dim) alloc_if(1) free_if(1)) \
-        inout(s_q:length(dim) alloc_if(1) free_if(1)) \
-        inout(s_k:length(kv_dim) alloc_if(1) free_if(1)) \
-        inout(s_v:length(kv_dim) alloc_if(1) free_if(1)) \
-        inout(s_att:length(p_seq_len) alloc_if(1) free_if(1)) \
-        inout(s_key_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(1) free_if(1)) \
-        inout(s_value_cache:length(p_n_layers*p_seq_len*kv_dim) alloc_if(1) free_if(1)) \
-        inout(s_logits:length(p_dim) alloc_if(1) free_if(1))
-        forward_mic(
-            token,
-            pos,
-            x,
-            dim,
-            kv_dim,
-            kv_mul,
-            hidden_dim,
-            head_size,
-            p_n_layers,
-            p_seq_len,
-            p_n_heads,
-            p_dim, 
-            p_vocab_size,
-            w_rms_att_weight,
-            w_wq,
-            w_wk,
-            w_wv,
-            w_wo, 
-            w_rms_ffn_weight,
-            w_w1,
-            w_w2,
-            w_w3,
-            w_rms_final_weight,
-            w_wcls, 
-            s_xb,
-            s_xb2,
-            s_hb,
-            s_hb2,
-            s_q,
-            s_k,
-            s_v,
-            s_att,
-            s_key_cache,
-            s_value_cache, 
-            s_logits
-        );
-    #else
-    // forward all the layers
-    for(unsigned long long l = 0; l < p->n_layers; l++) {
+        in(x:length(dim) free_if(0)) \
+        in(w_rms_att_weight:length(p_n_layers*dim) free_if(0)) \
+        in(w_wq:length(p_n_layers*dim*dim) free_if(0)) \
+        in(w_wk:length(p_n_layers*dim*kv_dim) free_if(0)) \
+        in(w_wv:length(p_n_layers*dim*kv_dim) free_if(0)) \
+        in(w_wo:length(p_n_layers*dim*dim) free_if(0)) \
+        in(w_rms_ffn_weight:length(p_n_layers*dim) free_if(0)) \
+        in(w_w1:length(p_n_layers*dim*hidden_dim) free_if(0)) \
+        in(w_w2:length(p_n_layers*dim*hidden_dim) free_if(0)) \
+        in(w_w3:length(p_n_layers*dim*hidden_dim) free_if(0)) \
+        in(w_rms_final_weight:length(dim) free_if(0)) \
+        in(w_wcls:length(dim*p_vocab_size) free_if(0)) \
+        out(s_logits:length(p_dim) free_if(0)) 
+    {
+        //printf("Phi!");
+        float *s_q = (float *)_mm_malloc(dim * sizeof(float), ALIGNMENT);
+        float *s_k; 
+        float *s_v; 
+        float *s_key_cache = (float *)_mm_malloc(p_n_layers*p_seq_len*kv_dim * sizeof(float), ALIGNMENT);
+        float *s_value_cache = (float *)_mm_malloc(p_n_layers*p_seq_len*kv_dim * sizeof(float), ALIGNMENT);
+        float *s_xb = (float *)_mm_malloc(dim * sizeof(float), ALIGNMENT);
+        float *s_xb2 = (float *)_mm_malloc(dim * sizeof(float), ALIGNMENT);
+        float *s_hb = (float *)_mm_malloc(dim * sizeof(float), ALIGNMENT);
+        float *s_hb2 = (float *)_mm_malloc(dim * sizeof(float), ALIGNMENT);
+        float *s_att = (float *)_mm_malloc(p_seq_len * sizeof(float), ALIGNMENT);
 
-        // attention rmsnorm
-        rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
+        for(unsigned long long l = 0; l < p_n_layers; l++) {
 
-        // key and value point to the kv cache
-        int loff = l * p->seq_len * kv_dim; // kv cache layer offset for convenience
-        s->k = s->key_cache + loff + pos * kv_dim;
-        s->v = s->value_cache + loff + pos * kv_dim;
+            // attention rmsnorm
+            rmsnorm(s_xb, x, w_rms_att_weight + l*dim, dim);
 
-        // qkv matmuls for this position
-        // printf("Offloading QKV matmuls to MIC\n");
-        #ifdef OFFLOAD
-            //printf("Offloading QKV matmuls to MIC\n");
-            qkv_matmul_mic(s, w, l, dim, kv_dim);
-        #else
-            matmul(s->q, s->xb, w->wq + l*dim*dim, dim, dim);
-            matmul(s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim);
-            matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
-        #endif
+            // key and value point to the kv cache
+            int loff = l * p_seq_len * kv_dim; // kv cache layer offset for convenience
+            s_k = s_key_cache + loff + pos * kv_dim;
+            s_v = s_value_cache + loff + pos * kv_dim;
 
-        // RoPE relative positional encoding: complex-valued rotate q and k in each head
-        for (int i = 0; i < dim; i+=2) {
-            int head_dim = i % head_size;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++) {
-                float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
-                float v0 = vec[i];
-                float v1 = vec[i+1];
-                vec[i]   = v0 * fcr - v1 * fci;
-                vec[i+1] = v0 * fci + v1 * fcr;
-            }
-        }
+            // qkv matmuls for this position
+            matmul_mic(s_q, s_xb, w_wq + l*dim*dim, dim, dim);
+            matmul_mic(s_k, s_xb, w_wk + l*dim*kv_dim, dim, kv_dim);
+            matmul_mic(s_v, s_xb, w_wv + l*dim*kv_dim, dim, kv_dim);
 
-        // multihead attention. iterate over all heads
-        int h;
-        #pragma omp parallel for private(h)
-        for (h = 0; h < p->n_heads; h++) {
-            // get the query vector for this head
-            float* q = s->q + h * head_size;
-            // attention scores for this head
-            float* att = s->att + h * p->seq_len;
-            // iterate over all timesteps, including the current one
-            for (int t = 0; t <= pos; t++) {
-                // get the key vector for this head and at this timestep
-                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // calculate the attention score as the dot product of q and k
-                float score = 0.0f;
-                for (int i = 0; i < head_size; i++) {
-                    score += q[i] * k[i];
-                }
-                score /= sqrtf(head_size);
-                // save the score to the attention buffer
-                att[t] = score;
-            }
-
-            // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(att, pos + 1);
-
-            // weighted sum of the values, store back into xb
-            float* xb = s->xb + h * head_size;
-            memset(xb, 0, head_size * sizeof(float));
-            for (int t = 0; t <= pos; t++) {
-                // get the value vector for this head and at this timestep
-                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // get the attention weight for this timestep
-                float a = att[t];
-                // accumulate the weighted value into xb
-                for (int i = 0; i < head_size; i++) {
-                    xb[i] += a * v[i];
+            // RoPE relative positional encoding: complex-valued rotate q and k in each head
+            for (int i = 0; i < dim; i+=2) {
+                int head_dim = i % head_size;
+                float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
+                float val = pos * freq;
+                float fcr = cosf(val);
+                float fci = sinf(val);
+                int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
+                for (int v = 0; v < rotn; v++) {
+                    float* vec = v == 0 ? s_q : s_k; // the vector to rotate (query or key)
+                    float v0 = vec[i];
+                    float v1 = vec[i+1];
+                    vec[i]   = v0 * fcr - v1 * fci;
+                    vec[i+1] = v0 * fci + v1 * fcr;
                 }
             }
+
+            // multihead attention. iterate over all heads
+            int h;
+            #pragma omp parallel for private(h)
+            for (h = 0; h < p_n_heads; h++) {
+                // get the query vector for this head
+                float* q = s_q + h * head_size;
+                // attention scores for this head
+                float* att = s_att + h * p_seq_len;
+                // iterate over all timesteps, including the current one
+                for (int t = 0; t <= pos; t++) {
+                    // get the key vector for this head and at this timestep
+                    float* k = s_key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                    // calculate the attention score as the dot product of q and k
+                    float score = 0.0f;
+                    for (int i = 0; i < head_size; i++) {
+                        score += q[i] * k[i];
+                    }
+                    score /= sqrtf(head_size);
+                    // save the score to the attention buffer
+                    att[t] = score;
+                }
+
+                // softmax the scores to get attention weights, from 0..pos inclusively
+                softmax(att, pos + 1);
+
+                // weighted sum of the values, store back into xb
+                float* xb = s_xb + h * head_size;
+                memset(xb, 0, head_size * sizeof(float));
+                for (int t = 0; t <= pos; t++) {
+                    // get the value vector for this head and at this timestep
+                    float* v = s_value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                    // get the attention weight for this timestep
+                    float a = att[t];
+                    // accumulate the weighted value into xb
+                    for (int i = 0; i < head_size; i++) {
+                        xb[i] += a * v[i];
+                    }
+                }
+            }
+            #pragma omp barrier
+
+            // final matmul to get the output of the attention
+            matmul_mic(s_xb2, s_xb, w_wo + l*dim*dim, dim, dim);
+
+            // residual connection back into x
+            //#pragma omp parallel for
+            for (int i = 0; i < dim; i++) {
+                x[i] += s_xb2[i];
+            }
+            //#pragma omp barrier
+
+            // ffn rmsnorm
+            rmsnorm(s_xb, x, w_rms_ffn_weight + l*dim, dim);
+
+            // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
+            // first calculate self.w1(x) and self.w3(x)
+            matmul_mic(s_hb, s_xb, w_w1 + l*dim*hidden_dim, dim, hidden_dim);
+            matmul_mic(s_hb2, s_xb, w_w3 + l*dim*hidden_dim, dim, hidden_dim);
+
+            // SwiGLU non-linearity
+            for (int i = 0; i < hidden_dim; i++) {
+                float val = s_hb[i];
+                // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+                val *= (1.0f / (1.0f + expf(-val)));
+                // elementwise multiply with w3(x)
+                val *= s_hb2[i];
+                s_hb[i] = val;
+            }
+
+            // final matmul to get the output of the ffn
+            matmul_mic(s_xb, s_hb, w_w2 + l*dim*hidden_dim, hidden_dim, dim);
+
+            // residual connection
+            for (int i = 0; i < dim; i++) {
+                x[i] += s_xb[i];
+            }
         }
 
-        // final matmul to get the output of the attention
-        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
+        // final rmsnorm
+        rmsnorm(x, x, w_rms_final_weight, dim);
 
-        // residual connection back into x
-        for (int i = 0; i < dim; i++) {
-            x[i] += s->xb2[i];
-        }
+        // classifier into logits
+        matmul_mic(s_logits, x, w_wcls, p_dim, p_vocab_size);
 
-        // ffn rmsnorm
-        rmsnorm(s->xb, x, w->rms_ffn_weight + l*dim, dim);
-
-        // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-        // first calculate self.w1(x) and self.w3(x)
-        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
-    
-        // SwiGLU non-linearity
-        for (int i = 0; i < hidden_dim; i++) {
-            float val = s->hb[i];
-            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-            val *= (1.0f / (1.0f + expf(-val)));
-            // elementwise multiply with w3(x)
-            val *= s->hb2[i];
-            s->hb[i] = val;
-        }
-
-        // final matmul to get the output of the ffn
-        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
-
-        // residual connection
-        for (int i = 0; i < dim; i++) {
-            x[i] += s->xb[i];
-        }
+        
+        _mm_free(s_q);
+        _mm_free(s_key_cache);
+        _mm_free(s_value_cache);
+        
+        _mm_free(s_xb);
+        _mm_free(s_xb2);
+        /*
+        _mm_free(s_hb);
+        _mm_free(s_hb2);
+        _mm_free(s_att);
+        */
+        
     }
-
-    // final rmsnorm
-    rmsnorm(x, x, w->rms_final_weight, dim);
-
-    // classifier into logits
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    // forward all the layers
     return s->logits;
-    #endif
 }
 
 // ----------------------------------------------------------------------------
@@ -756,10 +514,10 @@ void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size) {
 }
 
 void free_tokenizer(Tokenizer* t) {
-    for (int i = 0; i < t->vocab_size; i++) { free(t->vocab[i]); }
-    free(t->vocab);
-    free(t->vocab_scores);
-    free(t->sorted_vocab);
+    for (int i = 0; i < t->vocab_size; i++) { _mm_free(t->vocab[i]); }
+    _mm_free(t->vocab);
+    _mm_free(t->vocab_scores);
+    _mm_free(t->sorted_vocab);
 }
 
 char* decode(Tokenizer* t, int prev_token, int token) {
@@ -871,7 +629,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
             tokens[(*n_tokens)++] = id;
         } else {
             // byte_fallback encoding: just encode each byte as a token
-            // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
+            // +3 is here because the first 3 vocab elements are 
             // so the individual bytes only start at index 3
             for (int i=0; i < str_len; i++) {
                 tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
@@ -1189,11 +947,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             }
             // render user/system prompts into the Llama 2 Chat schema
             if (pos == 0 && system_prompt[0] != '\0') {
-                char system_template[] = "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]";
+                char system_template[] = "\n  <<SYS>>\n%s\n<</SYS>>\n\n%s \n";
                 sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
             } else {
-                char user_template[] = "[INST] %s [/INST]";
+                char user_template[] = "\n%s \n";
                 sprintf(rendered_prompt, user_template, user_prompt);
+
             }
             // encode the rendered prompt into tokens
             encode(tokenizer, rendered_prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
@@ -1301,7 +1060,9 @@ int main(int argc, char *argv[]) {
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
-	printf("Size of Transformer = %d\n", sizeof(transformer));
+	printf("There're %d layers in the transformer\n", transformer.config.n_layers);
+	printf("There're %d tokens in the tokenizer\n", transformer.config.vocab_size);
+    printf("Dim: %d\n", transformer.config.dim);
 
     // run!
     if (strcmp(mode, "generate") == 0) {
