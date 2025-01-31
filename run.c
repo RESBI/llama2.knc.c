@@ -18,6 +18,7 @@
 #include <omp.h>
 #include <time.h>
 
+#define ALIGNMENT 32
 #define OFFLOAD 1
 
 // ----------------------------------------------------------------------------
@@ -82,16 +83,17 @@ typedef struct {
 } Transformer;
 
 void malloc_run_state(RunState* s, Config* p) {
-    s->x = calloc(p->dim, sizeof(float));
-    s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
-    s->hb = calloc(p->hidden_dim, sizeof(float));
-    s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->q = calloc(p->dim, sizeof(float));
-    s->key_cache = calloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads, sizeof(float));
-    s->value_cache = calloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads, sizeof(float));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    s->logits = calloc(p->vocab_size, sizeof(float));
+    s->x = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->xb = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->xb2 = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->hb = (float*)_mm_malloc(p->hidden_dim * sizeof(float), ALIGNMENT);
+    s->hb2 = (float*)_mm_malloc(p->hidden_dim * sizeof(float), ALIGNMENT);
+    s->q = (float*)_mm_malloc(p->dim * sizeof(float), ALIGNMENT);
+    s->key_cache = (float*)_mm_malloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads * sizeof(float), ALIGNMENT);
+    s->value_cache = (float*)_mm_malloc(p->n_layers * p->seq_len * (p->dim * p->n_kv_heads) / p->n_heads * sizeof(float), ALIGNMENT);
+    s->att = (float*)_mm_malloc(p->n_heads * p->seq_len * sizeof(float), ALIGNMENT);
+    s->logits = (float*)_mm_malloc(p->vocab_size * sizeof(float), ALIGNMENT);
+
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
      || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
@@ -101,16 +103,17 @@ void malloc_run_state(RunState* s, Config* p) {
 }
 
 void free_run_state(RunState* s) {
-    free(s->x);
-    free(s->xb);
-    free(s->xb2);
-    free(s->hb);
-    free(s->hb2);
-    free(s->q);
-    free(s->att);
-    free(s->logits);
-    free(s->key_cache);
-    free(s->value_cache);
+    _mm_free(s->x);
+    _mm_free(s->xb);
+    _mm_free(s->xb2);
+    _mm_free(s->hb);
+    _mm_free(s->hb2);
+    _mm_free(s->q);
+    _mm_free(s->att);
+    _mm_free(s->logits);
+    _mm_free(s->key_cache);
+    _mm_free(s->value_cache);
+
 }
 
 void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared_weights) {
@@ -184,6 +187,7 @@ void free_transformer(Transformer* t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
+TARGET_ATTRIBUTE // MIC attribute
 void rmsnorm(float* o, float* x, float* weight, int size) {
     float ss = 0.0f;
     // Calculate sum of squares with vectorization
@@ -202,6 +206,17 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     }
 }
 
+void rmsnorm_mic(float* o, float* x, float* weight, int size) {
+    #pragma offload target(mic) \
+        in(x:length(size)) \
+        in(weight:length(size)) \
+        out(o:length(size))
+    {
+        rmsnorm(o, x, weight, size);
+    }
+}
+
+TARGET_ATTRIBUTE // MIC attribute
 void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
@@ -224,49 +239,42 @@ void softmax(float* x, int size) {
     }
 }
 
+void softmax_mic(float* x, int size) {
+    #pragma offload target(mic) \
+        inout(x:length(size))
+    {
+        softmax(x, size);
+    }
+}
+
 #ifndef OFFLOAD
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    const int block_size = 128;  // Output blocking for L1 cache
-    
-    #pragma omp parallel for 
-    for (int i = 0; i < d; i += block_size) {
-        const int imax = (i + block_size < d) ? i + block_size : d;
-        
-        #pragma vector aligned
-        #pragma simd
-        for (int ib = i; ib < imax; ib++) {
-            float val = 0.0f;
-            #pragma vector aligned
-            #pragma simd reduction(+:val)
-            for (int j = 0; j < n; j++) {
-                val += w[ib * n + j] * x[j];
-            }
-            xout[ib] = val;
+    // by far the most amount of time is spent inside this little function
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
         }
+        xout[i] = val;
     }
+    //#pragma omp barrier
 }
 #else
 TARGET_ATTRIBUTE // MIC attribute
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    const int block_size = 128;  // Output blocking for L1 cache
-    
-    #pragma omp parallel for 
-    for (int i = 0; i < d; i += block_size) {
-        const int imax = (i + block_size < d) ? i + block_size : d;
-        
-        #pragma vector aligned
-        #pragma simd
-        for (int ib = i; ib < imax; ib++) {
-            float val = 0.0f;
-            #pragma vector aligned
-            #pragma simd reduction(+:val)
-            for (int j = 0; j < n; j++) {
-                val += w[ib * n + j] * x[j];
-            }
-            xout[ib] = val;
+    // by far the most amount of time is spent inside this little function
+    int i;
+    #pragma omp parallel for private(i)
+    for (i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
         }
+        xout[i] = val;
     }
     #pragma omp barrier
 }
@@ -284,59 +292,30 @@ void qkv_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int kv_d
     float *wk_t = wk + l*dim*kv_dim;
     float *wv = w->wv;
     float *wv_t = wv + l*dim*kv_dim;
-	
-	char* sig; 
-    //printf("Offloading QKV matmuls to MIC\n");
-    #pragma offload target(mic:0) signal(sig) \
-        in(xb:length(dim)) \
-        in(wq_t:length(dim*dim)) \
-        in(wk_t:length(dim*kv_dim)) \
-        in(wv_t:length(dim*kv_dim)) \
-        out(q:length(dim)) \
-        out(k:length(kv_dim)) \
-        out(v:length(kv_dim))
+
+    #pragma offload target(mic) \
+        in(xb:length(dim) alloc_if(1) free_if(0)) \
+        in(wq_t:length(dim*dim) alloc_if(1) free_if(0)) \
+        in(wk_t:length(dim*kv_dim) alloc_if(1) free_if(0)) \
+        in(wv_t:length(dim*kv_dim) alloc_if(1) free_if(0)) \
+        out(q:length(dim) alloc_if(1) free_if(0)) \
+        out(k:length(kv_dim) alloc_if(1) free_if(0)) \
+        out(v:length(kv_dim) alloc_if(1) free_if(0))
     {
         matmul(q, xb, wq_t, dim, dim);
         matmul(k, xb, wk_t, dim, kv_dim);
         matmul(v, xb, wv_t, dim, kv_dim);
     }
-    #pragma offload_wait target(mic:0) wait(sig)
-}
-
-void ffn_matmul_mic(RunState* s, TransformerWeights* w, int l, int dim, int hidden_dim) {
-    float* hb = s->hb;
-    float* hb2 = s->hb2;
-    float* xb = s->xb;
-    float* w1 = w->w1;
-    float* w3 = w->w3;
-    float* w1_t = w1 + l*dim*hidden_dim;
-    float* w3_t = w3 + l*dim*hidden_dim;
-    char* sig;  
-
-    //printf("Offloading FFN matmuls to MIC\n");
-    #pragma offload target(mic:0) signal(sig) \
-        in(xb:length(dim)) \
-        in(w1_t:length(dim*hidden_dim)) \
-        in(w3_t:length(dim*hidden_dim)) \
-        out(hb:length(dim)) \
-        out(hb2:length(dim))
-    {
-        matmul(hb, xb, w1_t, dim, hidden_dim);
-        matmul(hb2, xb, w3_t, dim, hidden_dim);
-    }
-    #pragma offload_wait target(mic:0) wait(sig)
 }
 
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
-    //char* sig; 
     #pragma offload target(mic) \
-        in(x:length(n)) \
-        in(w:length(d*n)) \
-        out(xout:length(d))
+        in(x:length(n) alloc_if(1) free_if(0)) \
+        in(w:length(d*n) alloc_if(1) free_if(0)) \
+        out(xout:length(d) alloc_if(1) free_if(0))
     {
         matmul(xout, x, w, n, d);
     }
-    //#pragma offload_wait target(mic:0) wait(sig)
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -352,12 +331,6 @@ float* forward(Transformer* transformer, int token, int pos) {
     int hidden_dim =  p->hidden_dim;
     int head_size = dim / p->n_heads;
 
-    float *xout_temp;
-    float *x_temp;
-    float *w_temp;
-    int n_temp;
-    int d_temp;
-
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim*sizeof(*x));
@@ -366,7 +339,11 @@ float* forward(Transformer* transformer, int token, int pos) {
     for(unsigned long long l = 0; l < p->n_layers; l++) {
 
         // attention rmsnorm
-        rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
+        #ifdef OFFLOAD
+            rmsnorm_mic(s->xb, x, w->rms_att_weight + l*dim, dim);
+        #else
+            rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
+        #endif
 
         // key and value point to the kv cache
         int loff = l * p->seq_len * kv_dim; // kv cache layer offset for convenience
@@ -442,20 +419,11 @@ float* forward(Transformer* transformer, int token, int pos) {
         }
 
         // final matmul to get the output of the attention
-        /*
-        printf("Offloading final matmul to MIC\n");
         #ifdef OFFLOAD
-            xout_temp = s->xb2; 
-            x_temp = s->xb;
-            w_temp = w->wo + l*dim*dim;
-            n_temp = dim;
-            d_temp = dim;
-            matmul_mic(xout_temp, x_temp, w_temp, n_temp, d_temp);
+            matmul_mic(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
         #else
             matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
         #endif
-        */
-        matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
 
         // residual connection back into x
         for (int i = 0; i < dim; i++) {
@@ -467,18 +435,13 @@ float* forward(Transformer* transformer, int token, int pos) {
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        
-        //printf("Offloading FFN matmuls to MIC\n");
-        /*
         #ifdef OFFLOAD
-            ffn_matmul_mic(s, w, l, dim, hidden_dim);
+            matmul_mic(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
+            matmul_mic(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
         #else
             matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
             matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
         #endif
-        */
-        matmul(s->hb, s->xb, w->w1 + l*dim*hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l*dim*hidden_dim, dim, hidden_dim);
     
         // SwiGLU non-linearity
         for (int i = 0; i < hidden_dim; i++) {
@@ -491,20 +454,11 @@ float* forward(Transformer* transformer, int token, int pos) {
         }
 
         // final matmul to get the output of the ffn
-        /*
-        printf("Offloading final FFN matmul to MIC\n");
         #ifdef OFFLOAD
-            xout_temp = s->xb;
-            x_temp = s->hb;
-            w_temp = w->w2 + l*dim*hidden_dim;
-            n_temp = hidden_dim;
-            d_temp = dim;
-            matmul_mic(xout_temp, x_temp, w_temp, n_temp, d_temp);
+            matmul_mic(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
         #else
             matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
         #endif
-        */
-        matmul(s->xb, s->hb, w->w2 + l*dim*hidden_dim, hidden_dim, dim);
 
         // residual connection
         for (int i = 0; i < dim; i++) {
@@ -516,20 +470,11 @@ float* forward(Transformer* transformer, int token, int pos) {
     rmsnorm(x, x, w->rms_final_weight, dim);
 
     // classifier into logits
-    /*
-    printf("Offloading classifier matmul to MIC\n");
     #ifdef OFFLOAD
-        xout_temp = s->logits;
-        x_temp = x;
-        w_temp = w->wcls;
-        n_temp = p->dim;
-        d_temp = p->vocab_size;
-        matmul_mic(xout_temp, x_temp, w_temp, n_temp, d_temp);
+        matmul_mic(s->logits, x, w->wcls, p->dim, p->vocab_size);
     #else
         matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
     #endif
-    */
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
     return s->logits;
 }
 
@@ -581,10 +526,10 @@ void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size) {
 }
 
 void free_tokenizer(Tokenizer* t) {
-    for (int i = 0; i < t->vocab_size; i++) { free(t->vocab[i]); }
-    free(t->vocab);
-    free(t->vocab_scores);
-    free(t->sorted_vocab);
+    for (int i = 0; i < t->vocab_size; i++) { _mm_free(t->vocab[i]); }
+    _mm_free(t->vocab);
+    _mm_free(t->vocab_scores);
+    _mm_free(t->sorted_vocab);
 }
 
 char* decode(Tokenizer* t, int prev_token, int token) {
@@ -638,7 +583,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     // create a temporary buffer that will store merge candidates of always two consecutive tokens
     // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    char* str_buffer = malloc((t->max_token_length*2 +1 +2) * sizeof(char));
+    char* str_buffer = (char*)_mm_malloc((t->max_token_length*2 +1 +2) * sizeof(char), ALIGNMENT);
     size_t str_len = 0;
 
     // start at 0 tokens
@@ -739,7 +684,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     // add optional EOS (=2) token, if desired
     if (eos) tokens[(*n_tokens)++] = 2;
 
-    free(str_buffer);
+    _mm_free(str_buffer);
 }
 
 // ----------------------------------------------------------------------------
@@ -842,11 +787,11 @@ void build_sampler(Sampler* sampler, int vocab_size, float temperature, float to
     sampler->topp = topp;
     sampler->rng_state = rng_seed;
     // buffer only used with nucleus sampling; may not need but it's ~small
-    sampler->probindex = malloc(sampler->vocab_size * sizeof(ProbIndex));
+    sampler->probindex = (ProbIndex*)_mm_malloc(sampler->vocab_size * sizeof(ProbIndex), ALIGNMENT);
 }
 
 void free_sampler(Sampler* sampler) {
-    free(sampler->probindex);
+    _mm_free(sampler->probindex);
 }
 
 unsigned int random_u32(unsigned long long *state) {
@@ -1125,8 +1070,9 @@ int main(int argc, char *argv[]) {
     // build the Sampler
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
-
-	printf("Size of Transformer = %d\n", sizeof(transformer));
+	
+    printf("There're %d layers in the transformer\n", transformer.config.n_layers);
+	printf("There're %d tokens in the tokenizer\n", transformer.config.vocab_size);
 
     // run!
     if (strcmp(mode, "generate") == 0) {
