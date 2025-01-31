@@ -1,10 +1,12 @@
 ## What did I do and going to do? 
 
+<p align="center">
+  <img src="itruns.png">
+</p>
+
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
 
-For instance I've offloaded QVK matmul to Phi, but have no Idea how to go further, it keeps warning: 
-
-`offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)`
+Now it works well, but sometimes it crashes when it still outputting tokens. I don't know why, but I'm gonna fix it in the future.
 
 Resbi 2025-01-31 UTC+8
 
