@@ -1224,8 +1224,8 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
                 nocopy(w_rms_final_weight : length(dim) alloc_if(0) free_if(0)) \
                 nocopy(w_wcls : length(dim*p_vocab_size) alloc_if(0) free_if(0)) \
                 nocopy(s_q : length(dim) alloc_if(0) free_if(0)) \
-                inout(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                inout(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
+                out(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
+                out(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
                 nocopy(s_xb : length(dim) alloc_if(0) free_if(0)) \
                 nocopy(s_xb2 : length(dim) alloc_if(0) free_if(0)) \
                 nocopy(s_hb : length(hidden_dim) alloc_if(0) free_if(0)) \
