@@ -98,11 +98,11 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>$(ICPP_COMPILER17)mkl\include</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_WINHOST;SINGLE_PREC;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <MICOptions>\"-I$(ICPP_COMPILER17)mkl\include\"</MICOptions>
+      <MICOptions>\"-lmkl_sequential -lmkl_core -I$(ICPP_COMPILER17)mkl\include\"</MICOptions>
       <OpenMP>GenerateParallelCode</OpenMP>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <DisableSpecificWarnings>10373</DisableSpecificWarnings>
-      <OffloadArch>OffloadMIC</OffloadArch>
+      <OffloadArch>Default</OffloadArch>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
