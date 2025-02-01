@@ -1,7 +1,7 @@
 ## What did I do and going to do? 
 
 <p align="center">
-  <img src="itruns.png">
+  <img src="itrunsfaster.png">
 </p>
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
