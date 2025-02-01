@@ -14,20 +14,27 @@ It supports offloading part of layers to the card, specified by the `-o` option.
   <img src="itrunsllama2-7b.png">
 </p>
 
-The matrix multiplication function `matmul_mic` in `run.c` is working, but not optimized. I've tried to use `xgemv` and `xgemm` from Intel's MKL library, but it doesn't work. I'm not sure why. I guess there're some memory accessing errors.
+The matrix multiplication function `matmul_mic` in `run.c` is working, but not optimized. I've tried to use `xgemv` and `xgemm` from Intel's MKL library, but it gets wrong results.
 
-```C
-TARGET_MIC_ATTR float alpha = 1.0; 
-TARGET_MIC_ATTR float beta = 0.0; 
-TARGET_MIC_ATTR int incx = 1; 
-TARGET_MIC_ATTR int incy = 1; 
+```c
+TARGET_MIC_ATTR float MATMUL_ALPHA = 1.0; 
+TARGET_MIC_ATTR float MATMUL_BETA = 0.0; 
+TARGET_MIC_ATTR int MATMUL_ONE = 1; 
+TARGET_MIC_ATTR char MATMUL_TRANS = 'N';
+
+void matmul(float* xout, float* x, float* w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    //xgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
+    xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
+}
+
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
-	  // W (d,n) @ x (n,) -> xout (d,)
+	// W (d,n) @ x (n,) -> xout (d,)
     // Some memory accessing errors....
     // offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)
-    xgemv('N', &d, &n, &alpha, w, &d, x, &incx, &beta, xout, &incy);
-    //xgemm('N', 'N', &d, &incx, &n, &alpha, w, &d, x, &n, &beta, xout, &d);
+    //xgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
+    xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
 }
 ```
 
