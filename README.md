@@ -1,17 +1,17 @@
 ## What did I do and going to do? 
 
 <p align="center">
-  <img src="itrunsfaster.png">
+  <img src="itrunsfaster.gif">
 </p>
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
 
-Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
+Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. It runs the 110M model at ~18 tokens/s when fully offloaded.
 
 It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 10 layers. 
 
 <p align="center">
-  <img src="itrunsllama2-7b.png">
+  <img src="itrunsllama2-7b.gif">
 </p>
 
 The matrix multiplication function `matmul_mic` in `run.c` is working, but not optimized. I've tried to use `xgemv` and `xgemm` from Intel's MKL library, but it gets wrong results.
