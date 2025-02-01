@@ -358,25 +358,7 @@ void softmax_mic_serial(float* x, int size) {
     // #pragma omp barrier
 }
 
-/*
-void matmul(float* xout, float* x, float* w, int n, int d) {
-    // W (d,n) @ x (n,) -> xout (d,)
-    // by far the most amount of time is spent inside this little function
-    #pragma omp parallel for
-    for (int i = 0; i < d; i++) {
-        float val = 0.0f;
-        #pragma omp simd
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = val;
-    }
-    //#pragma omp barrier
-}
-*/
-
-/*
-// AVX2 version
+// AVX2 version. Somehow this is faster than the MKL version.
 void matmul(float* xout, const float* x, const float* w, int n, int d) {
     int nn = n / 8 * 8;  // ensure n is a multiple of 8
     int i;
@@ -425,6 +407,25 @@ void matmul(float* xout, const float* x, const float* w, int n, int d) {
     }
 }
 
+/*
+// Naive implementation
+void matmul(float* xout, float* x, float* w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    #pragma omp parallel for
+    for (int i = 0; i < d; i++) {
+        float val = 0.0f;
+        #pragma omp simd
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+    //#pragma omp barrier
+}
+*/
+
+/*
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
@@ -442,13 +443,14 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 }
 */
 
-/* 
+
 TARGET_MIC_ATTR float MATMUL_ALPHA = 1.0; 
 TARGET_MIC_ATTR float MATMUL_BETA = 0.0; 
 TARGET_MIC_ATTR int MATMUL_ONE = 1; 
 TARGET_MIC_ATTR char MATMUL_TRANS = 'N';
-*/
 
+// MKL version
+/*
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // Wrong results. 
@@ -457,6 +459,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     // Correct results. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
+*/
 
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
