@@ -8,6 +8,8 @@ I forked this repo to add support of offloading computation to Xeon Phi x100 car
 
 Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
 
+It supports offloading part of layers to Xeon Phi x100 cards. Specified by the `-o` option. I tried to run Llama 2 7B models, but it meets memory allocation errors.
+
 The matrix multiplication function `matmul_mic` in `run.c` is working, but not optimized. I've tried to use `xgemv` and `xgemm` from Intel's MKL library, but it doesn't work. I'm not sure why. I guess there're some memory accessing errors.
 
 ```C
