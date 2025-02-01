@@ -32,7 +32,6 @@ TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
     // Some memory accessing errors....
-    // offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)
     //xgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
     xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
 }
