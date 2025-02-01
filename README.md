@@ -8,7 +8,7 @@ I forked this repo to add support of offloading computation to Xeon Phi x100 car
 
 Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. It runs the 110M model at ~18 tokens/s when fully offloaded.
 
-It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 10 layers. 
+It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 15 layers. 
 
 <p align="center">
   <img src="itrunsllama2-7b.gif">
