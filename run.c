@@ -226,22 +226,27 @@ void free_transformer(Transformer* t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
+TARGET_MIC_ATTR int ONE = 1;
+
 void rmsnorm(float* o, float* x, float* weight, int size) {
     float ss = 0.0f;
     // Calculate sum of squares with vectorization
-    //#pragma omp parallel for simd reduction(+:ss)
+    /*
+    #pragma omp parallel for simd reduction(+:ss)
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
     }
     //#pragma omp barrier
+    */
+    ss = sdot(&size, x, &ONE, x, &ONE);
 
     ss /= size;
     ss += 1e-5f;
     ss = 1.0f / sqrtf(ss);
     
     // Normalize and scale with vectorization
-    //#pragma omp parallel for simd
-    #pragma omp simd
+    #pragma omp parallel for simd
+    //#pragma omp simd
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
@@ -252,11 +257,14 @@ TARGET_ATTRIBUTE // MIC attribute
 void rmsnorm_mic(float* o, float* x, float* weight, int size) {
     float ss = 0.0f;
     // Calculate sum of squares with vectorization
+    /*
     #pragma omp parallel for simd reduction(+:ss)
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
     }
     //#pragma omp barrier
+    */
+    ss = sdot(&size, x, &ONE, x, &ONE);
 
     ss /= size;
     ss += 1e-5f;
@@ -350,6 +358,7 @@ void softmax_mic_serial(float* x, int size) {
     // #pragma omp barrier
 }
 
+/*
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -363,6 +372,57 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
         xout[i] = val;
     }
     //#pragma omp barrier
+}
+*/
+
+/*
+// AVX2 version
+void matmul(float* xout, const float* x, const float* w, int n, int d) {
+    int nn = n / 8 * 8;  // ensure n is a multiple of 8
+    int i;
+    __m256 sum_vec;
+    #pragma omp parallel for private(i, sum_vec)
+    for (i = 0; i < d; i++) {
+        sum_vec = _mm256_setzero_ps(); // for AVX2, sum of 8 floats
+        int i_n = i * n;
+        #pragma omp simd
+        for (int j = 0; j < nn; j += 32) {
+            // Load 32 values from w and x
+            __m256 w_vec0 = _mm256_loadu_ps(&w[i_n + j]);
+            __m256 w_vec1 = _mm256_loadu_ps(&w[i_n + j + 8]);
+            __m256 w_vec2 = _mm256_loadu_ps(&w[i_n + j + 16]);
+            __m256 w_vec3 = _mm256_loadu_ps(&w[i_n + j + 24]);
+            __m256 x_vec0 = _mm256_loadu_ps(&x[j]);
+            __m256 x_vec1 = _mm256_loadu_ps(&x[j + 8]);
+            __m256 x_vec2 = _mm256_loadu_ps(&x[j + 16]);
+            __m256 x_vec3 = _mm256_loadu_ps(&x[j + 24]);
+
+            // Multiply and accumulate
+            __m256 prod_vec0 = _mm256_mul_ps(w_vec0, x_vec0);
+            __m256 prod_vec1 = _mm256_mul_ps(w_vec1, x_vec1);
+            __m256 prod_vec2 = _mm256_mul_ps(w_vec2, x_vec2);
+            __m256 prod_vec3 = _mm256_mul_ps(w_vec3, x_vec3);
+            sum_vec = _mm256_add_ps(sum_vec, prod_vec0);
+            sum_vec = _mm256_add_ps(sum_vec, prod_vec1);
+            sum_vec = _mm256_add_ps(sum_vec, prod_vec2);
+            sum_vec = _mm256_add_ps(sum_vec, prod_vec3);
+        }
+
+        // Perform horizontal add
+        sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
+        sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
+        float vals[8];
+        _mm256_storeu_ps(vals, sum_vec);
+        float val = vals[0] + vals[4];
+
+        // handle remainder if n is not a multiple of 8
+        int j;
+        #pragma omp simd reduction(+:val)
+        for (j = nn; j < n; j++) {
+            val += w[i_n + j] * x[j];
+        }
+        xout[i] = val;
+    }
 }
 
 TARGET_ATTRIBUTE // MIC attribute
@@ -380,28 +440,33 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 	}
 	//#pragma omp barrier
 }
+*/
 
-/*
+/* 
 TARGET_MIC_ATTR float MATMUL_ALPHA = 1.0; 
 TARGET_MIC_ATTR float MATMUL_BETA = 0.0; 
 TARGET_MIC_ATTR int MATMUL_ONE = 1; 
 TARGET_MIC_ATTR char MATMUL_TRANS = 'N';
+*/
 
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    //xgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
-    xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
+    // Wrong results. 
+    //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
+    //xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
+    // Correct results. 
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
 
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
-    // Some memory accessing errors....
-    // offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)
-    //xgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
-    xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
+    // Wrong results. 
+    //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
+    //sgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
+    // Correct results. 
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
-*/
 
 TARGET_ATTRIBUTE // MIC attribute
 void forward_mic(
@@ -1160,6 +1225,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 	float *s_hb2 = s->hb2;
 	float *s_att = s->att;
 
+    // Allocate memory on MIC
     if (offloaded_layers > 0) {
         char *sign;
 
@@ -1299,6 +1365,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     }
     printf("\n");
 
+    // Free the allocated memory on MIC
     if (offloaded_layers > 0) {
         char *sign;
 
@@ -1411,6 +1478,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 	float *s_hb2 = s->hb2;
 	float *s_att = s->att;
 
+    // Allocate memory on MIC
 	if (offloaded_layers > 0) {
         char *sign;
 
@@ -1586,6 +1654,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         if (next == 2) { printf("\n"); }
     }
     printf("\n");
+
+    // Free allocated memory on MIC
     if (offloaded_layers > 0) {
         char *sign;
 
@@ -1616,6 +1686,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         #pragma offload_wait target(mic : 0) wait(sign)
         printf("Freeing on MIC done\n");
     }
+
     _mm_free(prompt_tokens);
 }
 
