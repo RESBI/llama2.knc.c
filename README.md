@@ -6,7 +6,24 @@
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
 
-Now it works very well.
+Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
+
+The matrix multiplication function `matmul_mic` in `run.c` is working, but not optimized. I've tried to use `xgemv` and `xgemm` from Intel's MKL library, but it doesn't work. I'm not sure why. I guess there're some memory accessing errors.
+
+```C
+TARGET_MIC_ATTR float alpha = 1.0; 
+TARGET_MIC_ATTR float beta = 0.0; 
+TARGET_MIC_ATTR int incx = 1; 
+TARGET_MIC_ATTR int incy = 1; 
+TARGET_ATTRIBUTE // MIC attribute
+void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+	  // W (d,n) @ x (n,) -> xout (d,)
+    // Some memory accessing errors....
+    // offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)
+    xgemv('N', &d, &n, &alpha, w, &d, x, &incx, &beta, xout, &incy);
+    //xgemm('N', 'N', &d, &incx, &n, &alpha, w, &d, x, &n, &beta, xout, &d);
+}
+```
 
 Resbi 2025-02-01 UTC+8
 

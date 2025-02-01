@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include <fcntl.h>
 #if defined _WIN32
@@ -16,8 +17,43 @@
 #endif
 
 #include <offload.h>
-#include <omp.h>
+#include <immintrin.h>
 #include <time.h>
+#include "omp.h"
+
+/* Decorations for offload data and functions prototypes */
+#if defined( __INTEL_OFFLOAD) && ! defined (_WINHOST)
+#define TARGET_MIC_ATTR __attribute__((target(mic)))
+#define TARGET_MIC_PUSH _Pragma("offload_attribute(push,target(mic))")
+#define TARGET_MIC_POP _Pragma("offload_attribute(pop)")
+
+#elif defined(__INTEL_OFFLOAD) && defined (_WINHOST)
+#define TARGET_MIC_ATTR __declspec(target(mic))
+//for push use inline #pragma offload_attribute(push,target(mic))
+//for pop use inline #pragma offload_attribute(pop)
+
+#else
+#define TARGET_MIC_ATTR
+#define TARGET_MIC_PUSH
+#define TARGET_MIC_POP
+#endif
+
+#ifndef _WINHOST
+TARGET_MIC_PUSH
+#else
+#pragma offload_attribute(push,target(mic))
+#endif
+#include "mkl.h"
+#ifndef _WINHOST
+TARGET_MIC_POP
+#else
+#pragma offload_attribute(pop)
+#endif
+
+// use single precision for gemm
+#define fptype_t float
+#define xgemm sgemm
+#define xgemv sgemv
 
 #define ALIGNMENT 64
 #define OFFLOAD 1
@@ -283,6 +319,32 @@ void softmax_mic(float* x, int size) {
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
+    //#pragma omp barrier
+}
+
+TARGET_ATTRIBUTE // MIC attribute
+void softmax_mic_serial(float* x, int size) {
+    // find max value (for numerical stability)
+    float max_val = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+    // exp and sum
+    float sum = 0.0f;
+    //#pragma omp parallel for reduction(+:sum)
+    for (int i = 0; i < size; i++) {
+        x[i] = expf(x[i] - max_val);
+        sum += x[i];
+    }
+    //#pragma omp barrier
+
+    // normalize
+    #pragma omp simd
+    for (int i = 0; i < size; i++) {
+        x[i] /= sum;
+    }
     // #pragma omp barrier
 }
 
@@ -301,21 +363,37 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     #pragma omp barrier
 }
 
+
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_mic(float* xout, float* x, float* w, int n, int d) {
-    // W (d,n) @ x (n,) -> xout (d,)
-    // by far the most amount of time is spent inside this little function
-    #pragma omp parallel for 
-    for (int i = 0; i < d; i++) {
-        float val = 0.0f;
-        #pragma omp simd
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = val;
-    }
-    //#pragma omp barrier
+	// W (d,n) @ x (n,) -> xout (d,)
+	// by far the most amount of time is spent inside this little function
+	#pragma omp parallel for
+	for (int i = 0; i < d; i++) {
+		float val = 0.0f;
+		#pragma omp simd
+		for (int j = 0; j < n; j++) {
+			val += w[i * n + j] * x[j];
+		}
+		xout[i] = val;
+	}
+	//#pragma omp barrier
 }
+
+/*
+TARGET_MIC_ATTR float alpha = 1.0; 
+TARGET_MIC_ATTR float beta = 0.0; 
+TARGET_MIC_ATTR int incx = 1; 
+TARGET_MIC_ATTR int incy = 1; 
+TARGET_ATTRIBUTE // MIC attribute
+void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+	// W (d,n) @ x (n,) -> xout (d,)
+    // Some memory accessing errors....
+    // offload error: process on the device 0 was terminated by signal 11 (SIGSEGV)
+    xgemv('N', &d, &n, &alpha, w, &d, x, &incx, &beta, xout, &incy);
+    //xgemm('N', 'N', &d, &incx, &n, &alpha, w, &d, x, &n, &beta, xout, &d);
+}
+*/
 
 void forward_alloc(Transformer* transformer) {
     // a few convenience variables
@@ -599,7 +677,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 }
 
                 // softmax the scores to get attention weights, from 0..pos inclusively
-                softmax_mic(att, pos + 1);
+                softmax_mic_serial(att, pos + 1);
 
                 // weighted sum of the values, store back into xb
                 float* xb = s_xb + h * head_size;
