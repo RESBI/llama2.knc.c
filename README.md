@@ -14,7 +14,7 @@ It supports offloading part of layers to the card, specified by the `-o` option.
   <img src="itrunsllama2-7b.gif">
 </p>
 
-I got MKL worked. But it's interesting that for small models, it's slower than the naive implementation. But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~0.997 tokens/s.
+I got MKL worked. But it's interesting that for small models, it's slower than the naive implementation. But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
 
 It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host. MKL does faster than the naive implementation on the Xeon Phi x100 card.
 
