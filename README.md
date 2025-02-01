@@ -1,7 +1,7 @@
 ## What did I do and going to do? 
 
 <p align="center">
-  <img src="itrunsfaster.gif">
+  <img src="/pics/itrunsfaster.gif">
 </p>
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
@@ -11,7 +11,7 @@ Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards
 It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 15 layers. 
 
 <p align="center">
-  <img src="itrunsllama2-7b.gif">
+  <img src="/pics/itrunsfasterllama2-7b.gif">
 </p>
 
 I got MKL worked. But it's interesting that for small models, it's slower than the naive implementation. But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
