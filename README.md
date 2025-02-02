@@ -39,7 +39,53 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 }
 ```
 
-Resbi 2025-02-01 UTC+8
+I added an option `-M` to let you choose which matmul to run on CPU. Three options are available: 0:naive, 1:mkl, 2:avx2.
+
+With `-M 0`, it uses the naive implementation.
+
+```bash
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 0
+Using naive matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a little girl named Lily. She had a big dream. She wanted to go to the moon. Every night, she would look up at the sky and wish she could go there.
+One day, Lily met a fierce dog named Max. Max was big and strong, but he was also very kind. Lily told Max about her dream. Max wanted to help Lily reach her moon.Max and Lily made a plan to go to the moon together. They built a big rocket with toys and food for the trip. They went to sleep in the rocket, ready to go to the moon. In the morning, they woke up and saw the moon! It was so big and bright. They played and had fun all day. And that is how Lily's dream came true.
+achieved tok/s: 72.667217
+```
+
+With `-M 1`, it uses the MKL implementation.
+
+```bash
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 1  
+Using mkl matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a big bear. The bear was very strong and had big muscles. He liked to roar very loudly in the forest.
+One day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the birdOne day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the bird was in trouble and used his big muscles to help the bird fly away.
+The bird was very happy and thanked the bear. From that day on, the bear was not so loud anymore. He realized that being kind and helping others was more important than being loud and scaring them. The bear and the bird became good friends and had many adventures together in the forest.
+achieved tok/s: 37.575758
+```
+
+With `-M 2`, it uses the AVX2 implementation, which was choosed by default.
+
+```bash
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 2  
+Using avx2 matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a little girl named Lily. She loved to play in the sand at the beach. One day, Lily and her family went to the beach. She was so excited to play in the sand.
+Lily built a big sandcastle. She used a bucket to make a moat around her castle. Then, she found a pretty shell to put on top of the castle. But the tide was coming in and the water was too deep for her to cross.
+Lily was sad that she couldn't finish her castle. But then, her mommy gave her a big hug and said, "Don't worry, Lily. We can always build another castle next time." Lily smiled and felt happy again. She knew she could always build something even better next time.
+achieved tok/s: 71.072319
+```
+
+Resbi 2025-02-02 UTC+8
 
 ## llama2.c
 
