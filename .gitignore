@@ -1,0 +1,147 @@
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]eleases/
+[Rr]eleasesPublic/
+[Oo]utput/
+[Ll]og/
+[Ll]ogs/
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+*.sln.docstates
+
+# MonoDevelop
+*.userprefs
+
+# Auto-generated files by Visual Studio
+*.ncb
+*.suo
+*.sdf
+*.cache
+*.dbmdl
+*.opendb
+*.pdb
+*.psess
+*.vsp
+*.vsps
+*.vssscc
+*.vssscc
+*.vsix
+*.vsixmanifest
+*.vscode/
+.vscode/
+
+# NuGet
+*.nupkg
+*.snupkg
+*.nuspec
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+*.csproj.user
+
+# Tye
+.tye/
+
+# Rider
+.idea/
+
+# JetBrains Rider
+.idea/
+
+# Backup files
+*~
+*.bak
+*.tmp
+
+# Folder-specific ignores
+# Exclude folder for build output
+bin/
+obj/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# VS Code settings
+.vscode/
+
+# Other
+*.suo
+*.sln.docstates# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]eleases/
+[Rr]eleasesPublic/
+[Oo]utput/
+[Ll]og/
+[Ll]ogs/
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+*.sln.docstates
+
+# MonoDevelop
+*.userprefs
+
+# Auto-generated files by Visual Studio
+*.ncb
+*.suo
+*.sdf
+*.cache
+*.dbmdl
+*.opendb
+*.pdb
+*.psess
+*.vsp
+*.vsps
+*.vssscc
+*.vssscc
+*.vsix
+*.vsixmanifest
+*.vscode/
+.vscode/
+
+# NuGet
+*.nupkg
+*.snupkg
+*.nuspec
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+*.csproj.user
+
+# Tye
+.tye/
+
+# Rider
+.idea/
+
+# JetBrains Rider
+.idea/
+
+# Backup files
+*~
+*.bak
+*.tmp
+
+# Folder-specific ignores
+# Exclude folder for build output
+bin/
+obj/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# VS Code settings
+.vscode/
+
+# Other
+*.suo
+*.sln.docstates
