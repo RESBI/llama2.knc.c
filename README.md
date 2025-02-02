@@ -8,15 +8,119 @@ I forked this repo to add support of offloading computation to Xeon Phi x100 car
 
 Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. It runs the 110M model at ~18 tokens/s when fully offloaded.
 
+### Offloading layers
+
 It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 15 layers. 
 
 <p align="center">
   <img src="/pics/itrunsfasterllama2-7b.gif">
 </p>
 
-I got MKL worked. But it's interesting that for small models, it's slower than the naive implementation. But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
+### Matmul selection
 
-It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host. MKL does faster than the naive implementation on the Xeon Phi x100 card.
+#### CPU
+
+I added an option `-M` to let you choose which matmul to run on CPU. Three options are available: 0:naive, 1:MKL, 2:AVX2, it sets to 2 by default.
+
+With `-M 0`, it uses the naive implementation.
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 0
+Using naive matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a little girl named Lily. She had a big dream. She wanted to go to the moon. Every night, she would look up at the sky and wish she could go there.
+One day, Lily met a fierce dog named Max. Max was big and strong, but he was also very kind. Lily told Max about her dream. Max wanted to help Lily reach her moon.Max and Lily made a plan to go to the moon together. They built a big rocket with toys and food for the trip. They went to sleep in the rocket, ready to go to the moon. In the morning, they woke up and saw the moon! It was so big and bright. They played and had fun all day. And that is how Lily's dream came true.
+achieved tok/s: 72.667217
+```
+
+With `-M 1`, it uses the MKL implementation.
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 1  
+Using mkl matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a big bear. The bear was very strong and had big muscles. He liked to roar very loudly in the forest.
+One day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the birdOne day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the bird was in trouble and used his big muscles to help the bird fly away.
+The bird was very happy and thanked the bear. From that day on, the bear was not so loud anymore. He realized that being kind and helping others was more important than being loud and scaring them. The bear and the bird became good friends and had many adventures together in the forest.
+achieved tok/s: 37.575758
+```
+
+With `-M 2`, it uses the AVX2 implementation, which was choosed by default.
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 2  
+Using avx2 matmul on CPU...
+There're 12 layers in the transformer
+There're 0 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Once upon a time, there was a little girl named Lily. She loved to play in the sand at the beach. One day, Lily and her family went to the beach. She was so excited to play in the sand.
+Lily built a big sandcastle. She used a bucket to make a moat around her castle. Then, she found a pretty shell to put on top of the castle. But the tide was coming in and the water was too deep for her to cross.
+Lily was sad that she couldn't finish her castle. But then, her mommy gave her a big hug and said, "Don't worry, Lily. We can always build another castle next time." Lily smiled and felt happy again. She knew she could always build something even better next time.
+achieved tok/s: 71.072319
+```
+
+#### MIC
+
+To choose which matmul to run on MIC, use `-N` option (0:naive, 1:mkl, it sets to 1 by default). 
+
+Noticable that the naive implementation is faster than the MKL implementation on small models. But for large models, the MKL implementation is way more faster. By default, it uses the MKL implementation.
+
+With `-N 0`, it uses the AVX2 implementation.
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 0
+Using AVX2 matmul on CPU...
+Using naive matmul on MIC...
+There're 12 layers in the transformer
+There're 12 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Mallocing on MIC
+Mallocing on MIC done
+Once upon a time, there was a little boy named Tim. He liked to collect things like rocks, sticks, and leaves. One day, Tim went to the park to find new things to collect.
+At the park, Tim met a girl named Sue. Sue was a bit rude. She said, "I don't like your rocks. They are not good." Tim felt sad, but he still liked his rocks.     
+Tim and Sue talked about the history of his rocks. They learned that some rocks were pretty, and some rocks were big. They played together and found more rocks. Tim and Sue became friends, and they learned not to be rude to each other.
+Freeing on MIC
+Freeing on MIC done
+achieved tok/s: 18.530687
+```
+
+With `-N 1`, it uses the MKL implementation.
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 1     
+Using AVX2 matmul on CPU...
+Using MKL matmul on MIC...
+There're 12 layers in the transformer
+There're 12 layers offloaded to MIC
+There're 32000 tokens in the tokenizer
+Dim: 768
+Mallocing on MIC
+Mallocing on MIC done
+Once upon a time, there was a little boy named Timmy. Timmy loved to play in the park with his friends. One day, Timmy and his friends were playing hide-and-seek when they heard a loud noise. They looked up and saw a big monster! The monster was very scary and made them all scream.
+Timmy's friend, Billy, said, "I don't want to fight the monster!" But Timmy said, "Don't worry, Billy. We can be brave and make the monster go away." So, they all held hands and walked towards the monster. When they got closer, they realized that the monster was actually a big, friendly dog who just wanted to play.
+Timmy and his friends played with the dog and had lots of fun. They even gave him a bath because he was so dirty from being rolling in the mud. When it was time to go home, they all said goodbye to the dog and promised to come back and play with him again. Timmy felt very happy that they didn't let the scary monster stop them from having fun.
+Freeing on MIC
+Freeing on MIC done
+achieved tok/s: 15.122043
+```
+
+#### Performance
+
+In general, with small models, native ~ AVX2 > MKL. With large models, MKL >> AVX2 > native.
+
+### Blahblahblah
+
+I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
+
+It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host, and the MKL one **does** faster than the naive one on the Xeon Phi x100 card.
 
 ```c
 void matmul(float* xout, float* x, float* w, int n, int d) {
@@ -37,52 +141,6 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
     // Correct results. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
-```
-
-I added an option `-M` to let you choose which matmul to run on CPU. Three options are available: 0:naive, 1:mkl, 2:avx2.
-
-With `-M 0`, it uses the naive implementation.
-
-```bash
-PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 0
-Using naive matmul on CPU...
-There're 12 layers in the transformer
-There're 0 layers offloaded to MIC
-There're 32000 tokens in the tokenizer
-Dim: 768
-Once upon a time, there was a little girl named Lily. She had a big dream. She wanted to go to the moon. Every night, she would look up at the sky and wish she could go there.
-One day, Lily met a fierce dog named Max. Max was big and strong, but he was also very kind. Lily told Max about her dream. Max wanted to help Lily reach her moon.Max and Lily made a plan to go to the moon together. They built a big rocket with toys and food for the trip. They went to sleep in the rocket, ready to go to the moon. In the morning, they woke up and saw the moon! It was so big and bright. They played and had fun all day. And that is how Lily's dream came true.
-achieved tok/s: 72.667217
-```
-
-With `-M 1`, it uses the MKL implementation.
-
-```bash
-PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 1  
-Using mkl matmul on CPU...
-There're 12 layers in the transformer
-There're 0 layers offloaded to MIC
-There're 32000 tokens in the tokenizer
-Dim: 768
-Once upon a time, there was a big bear. The bear was very strong and had big muscles. He liked to roar very loudly in the forest.
-One day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the birdOne day, the bear was walking in the forest when he saw a little bird. The bird was scared and tried to fly away, but its wing was hurt. The bear saw that the bird was in trouble and used his big muscles to help the bird fly away.
-The bird was very happy and thanked the bear. From that day on, the bear was not so loud anymore. He realized that being kind and helping others was more important than being loud and scaring them. The bear and the bird became good friends and had many adventures together in the forest.
-achieved tok/s: 37.575758
-```
-
-With `-M 2`, it uses the AVX2 implementation, which was choosed by default.
-
-```bash
-PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 2  
-Using avx2 matmul on CPU...
-There're 12 layers in the transformer
-There're 0 layers offloaded to MIC
-There're 32000 tokens in the tokenizer
-Dim: 768
-Once upon a time, there was a little girl named Lily. She loved to play in the sand at the beach. One day, Lily and her family went to the beach. She was so excited to play in the sand.
-Lily built a big sandcastle. She used a bucket to make a moat around her castle. Then, she found a pretty shell to put on top of the castle. But the tide was coming in and the water was too deep for her to cross.
-Lily was sad that she couldn't finish her castle. But then, her mommy gave her a big hug and said, "Don't worry, Lily. We can always build another castle next time." Lily smiled and felt happy again. She knew she could always build something even better next time.
-achieved tok/s: 71.072319
 ```
 
 Resbi 2025-02-02 UTC+8
