@@ -359,7 +359,7 @@ void softmax_mic_serial(float* x, int size) {
 }
 
 // AVX2 version. Somehow this is faster than the MKL version.
-void matmul(float* xout, const float* x, const float* w, int n, int d) {
+void matmul_avx2(float* xout, const float* x, const float* w, int n, int d) {
     int nn = n / 8 * 8;  // ensure n is a multiple of 8
     int i;
     __m256 sum_vec;
@@ -407,9 +407,10 @@ void matmul(float* xout, const float* x, const float* w, int n, int d) {
     }
 }
 
-/*
+// matmul_imci_mic is a todo. 
+
 // Naive implementation
-void matmul(float* xout, float* x, float* w, int n, int d) {
+void matmul_naive(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     #pragma omp parallel for
@@ -423,11 +424,9 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     }
     //#pragma omp barrier
 }
-*/
 
-/*
 TARGET_ATTRIBUTE // MIC attribute
-void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+void matmul_naive_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
 	// by far the most amount of time is spent inside this little function
 	#pragma omp parallel for simd
@@ -441,8 +440,6 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
 	}
 	//#pragma omp barrier
 }
-*/
-
 
 TARGET_MIC_ATTR float MATMUL_ALPHA = 1.0; 
 TARGET_MIC_ATTR float MATMUL_BETA = 0.0; 
@@ -450,8 +447,7 @@ TARGET_MIC_ATTR int MATMUL_ONE = 1;
 TARGET_MIC_ATTR char MATMUL_TRANS = 'N';
 
 // MKL version
-/*
-void matmul(float* xout, float* x, float* w, int n, int d) {
+void matmul_mkl(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // Wrong results. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
@@ -459,10 +455,9 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     // Correct results. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
-*/
 
 TARGET_ATTRIBUTE // MIC attribute
-void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+void matmul_mkl_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
     // Wrong results. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
@@ -470,6 +465,8 @@ void matmul_mic(float* xout, float* x, float* w, int n, int d) {
     // Correct results. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
+
+#define matmul_mic matmul_mkl_mic
 
 TARGET_ATTRIBUTE // MIC attribute
 void forward_mic(
@@ -650,7 +647,8 @@ float* forward_cpu(
     Transformer* transformer, 
     int token, 
     int pos, 
-    int offloaded_layers
+    int offloaded_layers, 
+    void *matmul(float*, float*, float*, int, int)
 ) {
     // a few convenience variables
     Config* p = &transformer->config;
@@ -694,7 +692,7 @@ float* forward_cpu(
             s->k[i]   = s->k[i] * fcr - s->k[i+1] * fci;
             s->k[i+1] = s->k[i] * fci + s->k[i+1] * fcr;
         }
-
+        // Rotate q only. 
         #pragma omp parallel for simd
         for (int i = kv_dim; i < dim; i+=2) {
             int head_dim = i % head_size;
@@ -1173,7 +1171,8 @@ long time_in_ms() {
 // ----------------------------------------------------------------------------
 // generation loop
 
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, int offloaded_layers) {
+void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, int offloaded_layers, 
+                void *matmul_cpu(float*, float*, float*, int, int)) {
     char *empty_prompt = "";
     if (prompt == NULL) { prompt = empty_prompt; }
 
@@ -1281,25 +1280,25 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
                 in(p_dim) \
                 in(p_vocab_size) \
                 inout(x : length(dim) alloc_if(0) free_if(0)) \
-                nocopy(w_rms_att_weight : length(offloaded_layers*dim) alloc_if(0) free_if(0)) \
-                nocopy(w_wq : length(offloaded_layers*dim*dim) alloc_if(0) free_if(0)) \
-                nocopy(w_wk : length(offloaded_layers*dim*kv_dim) alloc_if(0) free_if(0)) \
-                nocopy(w_wv : length(offloaded_layers*dim*kv_dim) alloc_if(0) free_if(0)) \
-                nocopy(w_wo : length(offloaded_layers*dim*dim) alloc_if(0) free_if(0)) \
-                nocopy(w_rms_ffn_weight : length(offloaded_layers*dim) alloc_if(0) free_if(0)) \
-                nocopy(w_w1 : length(offloaded_layers*dim*hidden_dim) alloc_if(0) free_if(0)) \
-                nocopy(w_w2 : length(offloaded_layers*dim*hidden_dim) alloc_if(0) free_if(0)) \
-                nocopy(w_w3 : length(offloaded_layers*dim*hidden_dim) alloc_if(0) free_if(0)) \
-                nocopy(w_rms_final_weight : length(dim) alloc_if(0) free_if(0)) \
-                nocopy(w_wcls : length(dim*p_vocab_size) alloc_if(0) free_if(0)) \
-                nocopy(s_q : length(dim) alloc_if(0) free_if(0)) \
+                nocopy(w_rms_att_weight : alloc_if(0) free_if(0)) \
+                nocopy(w_wq : alloc_if(0) free_if(0)) \
+                nocopy(w_wk : alloc_if(0) free_if(0)) \
+                nocopy(w_wv : alloc_if(0) free_if(0)) \
+                nocopy(w_wo : alloc_if(0) free_if(0)) \
+                nocopy(w_rms_ffn_weight : alloc_if(0) free_if(0)) \
+                nocopy(w_w1 : alloc_if(0) free_if(0)) \
+                nocopy(w_w2 : alloc_if(0) free_if(0)) \
+                nocopy(w_w3 : alloc_if(0) free_if(0)) \
+                nocopy(w_rms_final_weight : alloc_if(0) free_if(0)) \
+                nocopy(w_wcls : alloc_if(0) free_if(0)) \
+                nocopy(s_q : alloc_if(0) free_if(0)) \
                 out(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
                 out(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                nocopy(s_xb : length(dim) alloc_if(0) free_if(0)) \
-                nocopy(s_xb2 : length(dim) alloc_if(0) free_if(0)) \
-                nocopy(s_hb : length(hidden_dim) alloc_if(0) free_if(0)) \
-                nocopy(s_hb2 : length(hidden_dim) alloc_if(0) free_if(0)) \
-                inout(s_att : length(p_n_heads * p_seq_len) alloc_if(0) free_if(0))
+                nocopy(s_xb : alloc_if(0) free_if(0)) \
+                nocopy(s_xb2 : alloc_if(0) free_if(0)) \
+                nocopy(s_hb : alloc_if(0) free_if(0)) \
+                nocopy(s_hb2 : alloc_if(0) free_if(0)) \
+                inout(s_att : length(p_n_heads * p_seq_len) alloc_if(0) free_if(0)) 
             {
                 forward_mic(
                     x, 
@@ -1342,7 +1341,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         }
 
         // forward the transformer to get logits for the next token
-        float* logits = forward_cpu(transformer, token, pos, offloaded_layers);
+        float* logits = forward_cpu(transformer, token, pos, offloaded_layers, matmul_cpu);
 
         // advance the state machine
         if (pos < num_prompt_tokens - 1) {
@@ -1427,7 +1426,8 @@ void read_stdin(const char* guide, char* buffer, size_t bufsize) {
 // is not safely implemented, it's more a proof of concept atm.
 
 void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
-          char *cli_user_prompt, char *cli_system_prompt, int steps, int offloaded_layers) {
+          char *cli_user_prompt, char *cli_system_prompt, int steps, int offloaded_layers, 
+          void *matmul_cpu(float*, float*, float*, int, int)) {
 
     // buffers for reading the system prompt and user prompt from stdin
     // you'll notice they are soomewhat haphazardly and unsafely set atm
@@ -1644,7 +1644,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         }
 
         // forward the transformer to get logits for the next token
-        float* logits = forward_cpu(transformer, token, pos, offloaded_layers);
+        float* logits = forward_cpu(transformer, token, pos, offloaded_layers, matmul_cpu);
         next = sample(sampler, logits);
         pos++;
 
@@ -1711,11 +1711,14 @@ void error_usage() {
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
+    fprintf(stderr, "  -M <string> choose Matmul function on CPU: 0:naive|1:mkl|2:avx2, default: 2\n");
+    //fprintf(stderr, "  -N <string> choose Matmul function on MIC: 0:naive|1:mkl, default: 1\n");
     exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[]) {
-
+    void *matmul_cpu = matmul_avx2;
+    //void *matmul_mic = matmul_mkl_mic;
     // default parameters
     char *checkpoint_path = NULL;  // e.g. out/model.bin
     char *tokenizer_path = "tokenizer.bin";
@@ -1727,6 +1730,8 @@ int main(int argc, char *argv[]) {
     char *mode = "generate";    // generate|chat
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
     int offloaded_layers = -1;
+    int matmul_selecting_cpu = 2;
+	//int matmul_selecting_mic = 1; 
 
     // poor man's C argparse so we can override the defaults above from the command line
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
@@ -1745,8 +1750,31 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; }
         else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
         else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
+        else if (argv[i][1] == 'M') { matmul_selecting_cpu = atoi(argv[i + 1]); }
+        //else if (argv[i][1] == 'N') { matmul_selecting_mic = atoi(argv[i + 1]); }
         else { error_usage(); }
     }
+
+    if (matmul_selecting_cpu == 0) {
+        matmul_cpu = matmul_naive;
+        printf("Using naive matmul on CPU...\n");
+    } else if (matmul_selecting_cpu == 1) {
+        matmul_cpu = matmul_mkl;
+        printf("Using mkl matmul on CPU...\n");
+    } else {
+        matmul_cpu = matmul_avx2;
+        printf("Using avx2 matmul on CPU...\n");
+    }
+
+    /*
+    if (matmul_selecting_mic == 0) {
+        matmul_mic = matmul_naive_mic;
+        printf("Using naive matmul on MIC...\n");
+    } else if (matmul_selecting_mic == 1) {
+        matmul_mic = matmul_mkl_mic;
+        printf("Using mkl matmul on MIC...\n");
+    }
+    */
 
     // parameter validation/overrides
     if (rng_seed <= 0) rng_seed = (unsigned int)time(NULL);
@@ -1778,9 +1806,9 @@ int main(int argc, char *argv[]) {
 
     // run!
     if (strcmp(mode, "generate") == 0) {
-        generate(&transformer, &tokenizer, &sampler, prompt, steps, offloaded_layers);
+        generate(&transformer, &tokenizer, &sampler, prompt, steps, offloaded_layers, matmul_cpu);
     } else if (strcmp(mode, "chat") == 0) {
-        chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, steps, offloaded_layers);
+        chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, steps, offloaded_layers, matmul_cpu);
     } else {
         fprintf(stderr, "unknown mode: %s\n", mode);
         error_usage();
