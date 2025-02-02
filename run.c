@@ -1366,7 +1366,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 
         // print the token as string, decode it with the Tokenizer object
         char* piece = decode(tokenizer, token, next);
-        safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
+        printf("%s", piece); // same as printf("%s", piece), but skips "unsafe" bytes
         fflush(stdout);
         token = next;
 
@@ -1410,7 +1410,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     // report achieved tok/s (pos-1 because the timer starts after first iteration)
     if (pos > 1) {
         long end = time_in_ms();
-        fprintf(stderr, "achieved tok/s: %f\n", (pos-1) / (double)(end-start)*1000);
+        fprintf(stderr, "%d tokens generated in %.3f s, achieved tok/s: %f\n", (pos-1), (double)(end-start) / 1000, (pos-1) / (double)(end-start)*1000);
     }
 
     free(prompt_tokens);
@@ -1729,7 +1729,7 @@ void error_usage() {
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
-    fprintf(stderr, "  -M <int> choose Matmul function on CPU: 0:naive|1:mkl|2:avx2, default: 2\n");
+    fprintf(stderr, "  -M <int> choose Matmul function on CPU: 0:naive|1:mkl|2:avx2, default: 0\n");
     fprintf(stderr, "  -N <int> choose Matmul function on MIC: 0:naive|1:mkl, default: 1\n");
     exit(EXIT_FAILURE);
 }
@@ -1748,7 +1748,7 @@ int main(int argc, char *argv[]) {
     char *mode = "generate";    // generate|chat
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
     int offloaded_layers = -1;
-    int matmul_selecting_cpu = 2;
+    int matmul_selecting_cpu = 0;
 	int matmul_selecting_mic = 1; 
 
     // poor man's C argparse so we can override the defaults above from the command line
@@ -1814,9 +1814,18 @@ int main(int argc, char *argv[]) {
 	}
 
 	printf("There're %d layers in the transformer\n", transformer.config.n_layers);
-    printf("There're %d layers offloaded to MIC\n", offloaded_layers);
+    printf("Offloading %d layers to MIC\n", offloaded_layers);
 	printf("There're %d tokens in the tokenizer\n", transformer.config.vocab_size);
-    printf("Dim: %d\n", transformer.config.dim);
+    printf("Maximum sequence length: %d\n", transformer.config.seq_len);
+    /*
+    printf("Dimension: %d\n", transformer.config.dim);
+    printf("Number of heads: %d\n", transformer.config.n_heads);
+    printf("Number of KV heads: %d\n", transformer.config.n_kv_heads);
+    printf("Head size: %d\n", transformer.config.head_size);
+    printf("Number of layers: %d\n", transformer.config.n_layers);
+    printf("Number of KV layers: %d\n", transformer.config.n_kv_layers);
+    */
+    printf("Steps limit: %d\n", steps); 
 
     // run!
     if (strcmp(mode, "generate") == 0) {
