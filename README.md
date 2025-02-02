@@ -20,7 +20,7 @@ It supports offloading part of layers to the card, specified by the `-o` option.
 
 #### CPU
 
-I added an option `-M` to let you choose which matmul to run on CPU. Three options are available: 0:naive, 1:MKL, 2:AVX2, it sets to 2 by default.
+I added an option `-M` to let you choose which matmul to run on CPU. Three options are available: 0:naive, 1:MKL, 2:AVX2, it sets to 0 by default.
 
 With `-M 0`, it uses the naive implementation.
 
@@ -51,7 +51,7 @@ The bird was very happy and thanked the bear. From that day on, the bear was not
 achieved tok/s: 37.575758
 ```
 
-With `-M 2`, it uses the AVX2 implementation, which was choosed by default.
+With `-M 2`, it uses the AVX2 implementation.
 
 ```powershell
 PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -o 0 -M 2  
@@ -114,7 +114,7 @@ achieved tok/s: 15.122043
 
 #### Performance
 
-In general, with small models, native ~ AVX2 > MKL. With large models, MKL >> AVX2 > native.
+In general, with small models, native ~> AVX2 > MKL. With large models, MKL >> AVX2 > native.
 
 ### Blahblahblah
 
