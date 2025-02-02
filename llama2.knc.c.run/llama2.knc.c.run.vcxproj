@@ -40,6 +40,7 @@
     <PlatformToolset>Intel C++ Compiler 17.0</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>MultiByte</CharacterSet>
+    <UseOfMfc>Static</UseOfMfc>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release-knllb|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
@@ -100,9 +101,11 @@
       <PreprocessorDefinitions>_WINHOST;SINGLE_PREC;_MBCS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MICOptions>\"-lmkl_sequential -lmkl_core -I$(ICPP_COMPILER17)mkl\include\"</MICOptions>
       <OpenMP>GenerateParallelCode</OpenMP>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <DisableSpecificWarnings>10373</DisableSpecificWarnings>
       <OffloadArch>Default</OffloadArch>
+      <InlineFunctionExpansion>Default</InlineFunctionExpansion>
+      <UseIntelOptimizedHeaders>true</UseIntelOptimizedHeaders>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
