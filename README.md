@@ -123,22 +123,23 @@ I got MKL worked. But it's interesting that for small models, it's slower than t
 It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host, and the MKL one **does** faster than the naive one on the Xeon Phi x100 card.
 
 ```c
-void matmul(float* xout, float* x, float* w, int n, int d) {
+// MKL version
+void matmul_mkl(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    // Wrong results. 
+    // Wrong Answers. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
     //xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
-    // Correct results. 
+    // Answers Correct. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
 
 TARGET_ATTRIBUTE // MIC attribute
-void matmul_mic(float* xout, float* x, float* w, int n, int d) {
+void matmul_mkl_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
-    // Wrong results. 
+    // Wrong Answers. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
     //sgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
-    // Correct results. 
+    // Answers Correct. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
 ```
