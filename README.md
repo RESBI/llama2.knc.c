@@ -120,6 +120,43 @@ In general, with small models, native ~> AVX2 > MKL. With large models, MKL >> A
 
 I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
 
+**BUT**, with the tiniest 260K model running on the host, MKL runs ~2x faster than the naive one, and the AVX2 one even returns wrong data. Which didn't happen on the Xeon Phi x100 card.
+
+With naive matmul: 
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories260K.bin -z .\tok512.bin -o 0 -M 0
+Using naive matmul on CPU...
+Using MKL matmul on MIC...
+There're 5 layers in the transformer
+Offloading 0 layers to MIC
+There're 512 tokens in the tokenizer
+Maximum sequence length: 512
+Steps limit: 256
+Once upon a time, there was a time there was a little boy named Tim. He loved toy was a buncherfoard and drodeelffer? other bys because he did shry and list the sides to his mom and dad.
+On anerter the bromeach a newow every day. Tim went jumodulted insed. He was cly was god his hand. Tim worrate, "I cleoml I comed you get a neway the cleing!" Tim hock agricked his friends them. They ma eake and all that they raking thems. They all tog, the ro hide and all se of the a wing everyons togve and car. They laly toggs and their have lous and shion neway.
+
+255 tokens generated in 0.219 s, achieved tok/s: 1164.383562
+```
+
+with MKL matmul: 
+
+```powershell
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories260K.bin -z .\tok512.bin -o 0 -M 1
+Using MKL matmul on CPU...
+Using MKL matmul on MIC...
+There're 5 layers in the transformer
+Offloading 0 layers to MIC
+There're 512 tokens in the tokenizer
+Maximum sequence length: 512
+Steps limit: 256
+Once upon a time, there was an a little girl named Mittens. Mitty loved to eat, Mah was very moonsed the seack.
+One day they play atep on the grase. Max said, "Wow, Mander, proy on a raguer?" is could you nex grace rigad.
+She manyafter to take pemones so exerve to tach and mumo dry was so happy. Embace said to splier and catered. Jo, and telling shone in the jusin in a left atway helter, coush!
+Sally pretleing fornaches sticked her smoon, and ceed and golfly. She frous and engineed to
+255 tokens generated in 0.156 s, achieved tok/s: 1634.615385
+```
+
 It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host, and the MKL one **does** faster than the naive one on the Xeon Phi x100 card.
 
 ```c
