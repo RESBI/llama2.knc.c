@@ -1253,7 +1253,8 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
             nocopy(s_hb : length(hidden_dim) alloc_if(1) free_if(0)) \
             nocopy(s_hb2 : length(hidden_dim) alloc_if(1) free_if(0)) \
             nocopy(s_att : length(p_n_heads * p_seq_len) alloc_if(1) free_if(0))
-        {}
+        {
+        }
         #pragma offload_wait target(mic : 0) wait(sign)
         printf("Mallocing on MIC done\n");
     }
@@ -1809,23 +1810,24 @@ int main(int argc, char *argv[]) {
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
-	if (offloaded_layers == -1) {
+	if (offloaded_layers == -1 || offloaded_layers > transformer.config.n_layers) {
 		offloaded_layers = transformer.config.n_layers;
 	}
 
-	printf("There're %d layers in the transformer\n", transformer.config.n_layers);
-    printf("Offloading %d layers to MIC\n", offloaded_layers);
 	printf("There're %d tokens in the tokenizer\n", transformer.config.vocab_size);
-    printf("Maximum sequence length: %d\n", transformer.config.seq_len);
-    /*
     printf("Dimension: %d\n", transformer.config.dim);
     printf("Number of heads: %d\n", transformer.config.n_heads);
     printf("Number of KV heads: %d\n", transformer.config.n_kv_heads);
     printf("Head size: %d\n", transformer.config.head_size);
     printf("Number of layers: %d\n", transformer.config.n_layers);
     printf("Number of KV layers: %d\n", transformer.config.n_kv_layers);
-    */
+    printf("Number of KV dim: %d\n", transformer.config.kv_dim);
+    printf("Number of KV mul: %d\n", transformer.config.kv_mul);
+    printf("Number of hidden dim: %d\n", transformer.config.hidden_dim);
+    printf("Maximum sequence length: %d\n", transformer.config.seq_len);
+    printf("Offloading %d layers to MIC\n", offloaded_layers);
     printf("Steps limit: %d\n", steps); 
+
 
     // run!
     if (strcmp(mode, "generate") == 0) {
