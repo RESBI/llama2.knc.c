@@ -56,7 +56,6 @@ TARGET_MIC_POP
 #define xgemv sgemv
 
 #define ALIGNMENT 64
-#define OFFLOAD 1
 #define NUM_THREADS_MIC 244
 
 // ----------------------------------------------------------------------------
@@ -1447,12 +1446,15 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
     int user_idx;
 
+    long start_time = 0;  // used to time our code, only initialized after first iteration
+    long end_time = 0; 
     // start the main loop
     int8_t user_turn = 1; // user starts
     int next;        // will store the next token in the sequence
     int token;       // stores the current token to feed into the transformer
     int prev_token;
     int pos = 0;     // position in the sequence
+    int pos_previous = 0;
 
 	Config* p = &transformer->config;
 	TransformerWeights* w = &transformer->weights;
@@ -1542,15 +1544,24 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 // user prompt for position 0 was passed in, use it
                 strcpy(user_prompt, cli_user_prompt);
             } else {
+                if (pos) {
+                    end_time = time_in_ms();
+                    fprintf(stderr, "\n%d tokens generated in %.3f s, achieved tok/s: %f\n", 
+                                        (pos - pos_previous), 
+                                        (double)(end_time -start_time) / 1000, 
+                                        (pos - pos_previous) / (double)(end_time - start_time) *1000);
+                }
                 // otherwise get user prompt from stdin
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
+                start_time = time_in_ms();
+                pos_previous = pos; 
             }
             // render user/system prompts into the Llama 2 Chat schema
             if (pos == 0 && system_prompt[0] != '\0') {
-                char system_template[] = "\n  <<SYS>>\n%s\n<</SYS>>\n\n%s \n";
+                char system_template[] = "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]";
                 sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
             } else {
-                char user_template[] = "\n%s \n";
+                char user_template[] = "[INST] %s [/INST]";
                 sprintf(rendered_prompt, user_template, user_prompt);
 
             }
