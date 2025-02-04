@@ -181,6 +181,44 @@ void matmul_mkl_mic(float* xout, float* x, float* w, int n, int d) {
 }
 ```
 
+### About the chat mode
+
+I have no Idea on why it's not working, seems the model has less attention than normal... But it did gives me some correct response once: 
+
+```
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\llama-2-7b-chat-hf-v4.bin -o 13 -n 4096 -m chat
+Choosed naive matmul on CPU...
+Choosed MKL matmul on MIC...
+Tokenizer size: 32000
+Transformer config:
+        model name: .\llama-2-7b-chat-hf-v4.bin
+        n_layers: 32
+        n_heads: 32
+        n_kv_heads: 32
+        dim: 4096
+        hidden_dim: 11008
+        seq_len: 4096
+Offloading 13 of 32 layers to MIC
+Steps limit: 4096
+Mallocing on MIC
+Mallocing on MIC done
+Enter system prompt (optional): 
+User: Hello! Please gives me an example of writing Helloworld in Cpp!
+Assistant:
+#include <iostream>
+
+int main(){
+
+cout << "Hello World!" << endl;
+return 0;
+
+}
+
+
+<s>
+User: 
+```
+
 Resbi 2025-02-02 UTC+8
 
 ## llama2.c
