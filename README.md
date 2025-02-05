@@ -1,16 +1,18 @@
 ## What did I do and going to do? 
 
 <p align="center">
-  <img src="/pics/itrunsfaster.gif">
+  <img src="/pics/itrunsmuchfaster.gif">
 </p>
 
 I forked this repo to add support of offloading computation to Xeon Phi x100 cards.
 
-Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. It runs the 110M model at ~18 tokens/s when fully offloaded.
+Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
+
+It runs the 110M model at ~24 tokens/s when fully offloaded, and the llama2-7b fp32 model at ~1.2 tokens/s with 15 of 32 layers offloaded.
 
 ### Offloading layers
 
-It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 15 layers. 
+It supports offloading part of layers to the card, specified by the `-o` option. Now it can run llama2 7b model by offloading no more than 15 layers (better <= 13 layers). 
 
 <p align="center">
   <img src="/pics/itrunsfasterllama2-7b.gif">
@@ -72,44 +74,60 @@ To choose which matmul to run on MIC, use `-N` option (0:naive, 1:mkl, it sets t
 
 Noticable that the naive implementation is faster than the MKL implementation on small models. But for large models, the MKL implementation is way more faster. By default, it uses the MKL implementation.
 
-With `-N 0`, it uses the AVX2 implementation.
+With `-N 0`, it uses the naive implementation.
 
 ```powershell
-PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 0
-Using AVX2 matmul on CPU...
-Using naive matmul on MIC...
-There're 12 layers in the transformer
-There're 12 layers offloaded to MIC
-There're 32000 tokens in the tokenizer
-Dim: 768
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 0 -i "Yesterday, "
+Choosed naive matmul on CPU...
+Choosed naive matmul on MIC...
+Tokenizer size: 32000
+Transformer config:
+        model name: .\stories110M.bin
+        n_layers: 12
+        n_heads: 12
+        n_kv_heads: 12
+        dim: 768
+        hidden_dim: 2048
+        seq_len: 1024
+Offloading 12 of 12 layers to MIC
+Steps limit: 256
 Mallocing on MIC
 Mallocing on MIC done
-Once upon a time, there was a little boy named Tim. He liked to collect things like rocks, sticks, and leaves. One day, Tim went to the park to find new things to collect.
-At the park, Tim met a girl named Sue. Sue was a bit rude. She said, "I don't like your rocks. They are not good." Tim felt sad, but he still liked his rocks.     
-Tim and Sue talked about the history of his rocks. They learned that some rocks were pretty, and some rocks were big. They played together and found more rocks. Tim and Sue became friends, and they learned not to be rude to each other.
+Yesterday,  Peter and his mommy went to the park. Peter was wearing his blue and green t-shirt and he was very excited. 
+At the park, they saw lots of children playing and running around. Suddenly, Peter heard a loud bang! He stopped and looked around, but he couldn't see anything. His mommy explained that the sound was from a gunshot. She said it was an available toy gun that someone had dropped and it had a red button. 
+Peter asked if he could play with it. His mommy said it was okay, so he grabbed it, and pulled the trigger. "Bang!" The gun shot out of Peter's hand, making a loud noise. Everyone around them laughed. 
+Peter was a bit scared, but his mommy said he was okay. She reminded him that guns are not toys, and she was glad he asked what it was. 
+After that, they both had fun at the park and went home with a big smile on their faces!
 Freeing on MIC
 Freeing on MIC done
-achieved tok/s: 18.530687
+225 tokens generated in 8.938 s, achieved tok/s: 25.173417
 ```
 
 With `-N 1`, it uses the MKL implementation.
 
 ```powershell
-PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 1     
-Using AVX2 matmul on CPU...
-Using MKL matmul on MIC...
-There're 12 layers in the transformer
-There're 12 layers offloaded to MIC
-There're 32000 tokens in the tokenizer
-Dim: 768
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 1 -i "Yesterday, " 
+Choosed naive matmul on CPU...
+Choosed MKL matmul on MIC...
+Tokenizer size: 32000
+Transformer config:
+        model name: .\stories110M.bin
+        n_layers: 12
+        n_heads: 12
+        n_kv_heads: 12
+        dim: 768
+        hidden_dim: 2048
+        seq_len: 1024
+Offloading 12 of 12 layers to MIC
+Steps limit: 256
 Mallocing on MIC
 Mallocing on MIC done
-Once upon a time, there was a little boy named Timmy. Timmy loved to play in the park with his friends. One day, Timmy and his friends were playing hide-and-seek when they heard a loud noise. They looked up and saw a big monster! The monster was very scary and made them all scream.
-Timmy's friend, Billy, said, "I don't want to fight the monster!" But Timmy said, "Don't worry, Billy. We can be brave and make the monster go away." So, they all held hands and walked towards the monster. When they got closer, they realized that the monster was actually a big, friendly dog who just wanted to play.
-Timmy and his friends played with the dog and had lots of fun. They even gave him a bath because he was so dirty from being rolling in the mud. When it was time to go home, they all said goodbye to the dog and promised to come back and play with him again. Timmy felt very happy that they didn't let the scary monster stop them from having fun.
+Yesterday, icy cold fell from the sky. Little Lily and her mommy went to the park to play. They went on the slide and the swings. Lily had so much fun!
+As they were leaving the park, Lily saw a big truck. It was carrying a lot of ice cream. Lily's eyes got big and she nodded her head to show her mommy. They went to get some ice cream and it was very yummy. 
+After they finished their ice cream, they went back home. Lily was happy and tired from playing. She fell asleep in the car on the way back. When they got home, Lily's mommy put her to bed. She tucked her in and said goodnight. Lily smiled and fell asleep, dreaming of the fun she had yesterday.
 Freeing on MIC
 Freeing on MIC done
-achieved tok/s: 15.122043
+182 tokens generated in 8.546 s, achieved tok/s: 21.296513
 ```
 
 #### Performance
@@ -118,7 +136,7 @@ In general, with small models, native ~> AVX2 > MKL. With large models, MKL >> A
 
 ### Blahblahblah
 
-I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~18 tokens/s to ~15 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
+I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~24 tokens/s to ~20 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
 
 **BUT**, with the tiniest 260K model running on the host, MKL runs ~2x faster than the naive one, and the AVX2 one even returns wrong data. Which didn't happen on the Xeon Phi x100 card.
 
@@ -126,35 +144,44 @@ With naive matmul:
 
 ```powershell
 PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories260K.bin -z .\tok512.bin -o 0 -M 0
-Using naive matmul on CPU...
-Using MKL matmul on MIC...
-There're 5 layers in the transformer
-Offloading 0 layers to MIC
-There're 512 tokens in the tokenizer
-Maximum sequence length: 512
+Choosed naive matmul on CPU...
+Choosed MKL matmul on MIC...
+Tokenizer size: 512
+Transformer config:
+        model name: .\stories260K.bin
+        n_layers: 5
+        n_heads: 8
+        n_kv_heads: 4
+        dim: 64
+        hidden_dim: 172
+        seq_len: 512
+Offloading 0 of 5 layers to MIC
 Steps limit: 256
-Once upon a time, there was a time there was a little boy named Tim. He loved toy was a buncherfoard and drodeelffer? other bys because he did shry and list the sides to his mom and dad.
-On anerter the bromeach a newow every day. Tim went jumodulted insed. He was cly was god his hand. Tim worrate, "I cleoml I comed you get a neway the cleing!" Tim hock agricked his friends them. They ma eake and all that they raking thems. They all tog, the ro hide and all se of the a wing everyons togve and car. They laly toggs and their have lous and shion neway.
-
-255 tokens generated in 0.219 s, achieved tok/s: 1164.383562
+One day, a big ant cameked a time in a big clop the brin. The cook was fell dollies behive maning. The big liked told anim. The bear looked, "Hi, which was away too!"
+Aft the roon fly. He was up theniding deairsed on the fount. The wat, and could som whoble and scurd a taleme. The little red on the big highis cox and fly could manthed. The frrace and jam woulder. man, the gizza, and and kicten. The doge was happy and suro lot of the granceed. happy one, it was so malal. The rosteace for never nop.
+242 tokens generated in 0.188 s, achieved tok/s: 1287.234043
 ```
 
 with MKL matmul: 
 
 ```powershell
 PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories260K.bin -z .\tok512.bin -o 0 -M 1
-Using MKL matmul on CPU...
-Using MKL matmul on MIC...
-There're 5 layers in the transformer
-Offloading 0 layers to MIC
-There're 512 tokens in the tokenizer
-Maximum sequence length: 512
+Choosed MKL matmul on CPU...
+Choosed MKL matmul on MIC...
+Tokenizer size: 512
+Transformer config:
+        model name: .\stories260K.bin
+        n_layers: 5
+        n_heads: 8
+        n_kv_heads: 4
+        dim: 64
+        hidden_dim: 172
+        seq_len: 512
+Offloading 0 of 5 layers to MIC
 Steps limit: 256
-Once upon a time, there was an a little girl named Mittens. Mitty loved to eat, Mah was very moonsed the seack.
-One day they play atep on the grase. Max said, "Wow, Mander, proy on a raguer?" is could you nex grace rigad.
-She manyafter to take pemones so exerve to tach and mumo dry was so happy. Embace said to splier and catered. Jo, and telling shone in the jusin in a left atway helter, coush!
-Sally pretleing fornaches sticked her smoon, and ceed and golfly. She frous and engineed to
-255 tokens generated in 0.156 s, achieved tok/s: 1634.615385
+Once upon a time, there was automosine. The flup was a hard with a bive hor and pale and they had runn gore. They builts with her gook. They liked to play with them.
+One day, a girly ro. He saw a big wisth was the bluster palownictt. The guround it was a prew, but the rubberer was their knightthing in the ro. He podding as. The rugeroper drewing and the tabed a splin distant in her crum could about the goed the wave icking beched wors to ke to goodrrrp in the pied rickrocuit ste Anly. shischla whmter fly.
+255 tokens generated in 0.140 s, achieved tok/s: 1821.428571
 ```
 
 It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host, and the MKL one **does** faster than the naive one on the Xeon Phi x100 card.
@@ -219,7 +246,7 @@ return 0;
 User: 
 ```
 
-Resbi 2025-02-02 UTC+8
+Resbi 2025-02-05 UTC+8
 
 ## llama2.c
 
