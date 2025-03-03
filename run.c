@@ -226,6 +226,7 @@ void free_transformer(Transformer* t) {
 // neural net blocks; the dynamics of the Transformer
 
 TARGET_MIC_ATTR int ONE = 1;
+TARGET_MIC_ATTR float rLN2 = 1.44269504088896340735992468100189213742664595415298593413544940693110921918f;
 
 #ifndef __MIC__
 
@@ -266,7 +267,8 @@ void softmax(float* x, int size) {
     float sum = 0.0f;
     #pragma omp parallel for reduction(+:sum)
     for (int i = 0; i < size; i++) {
-        x[i] = expf(x[i] - max_val);
+		x[i] = expf(x[i] - max_val);
+        //x[i] = exp2f(x[i] - max_val) * rLN2;
         sum += x[i];
     }
     //#pragma omp barrier
@@ -323,7 +325,8 @@ void softmax(float* x, int size) {
     float sum = 0.0f;
     #pragma omp parallel for reduction(+:sum)
     for (int i = 0; i < size; i++) {
-        x[i] = expf(x[i] - max_val);
+		x[i] = expf(x[i] - max_val);
+        //x[i] = exp2f(x[i] - max_val) * rLN2;
         sum += x[i];
     }
     //#pragma omp barrier
@@ -530,6 +533,7 @@ void forward_mic(
 
         // qkv matmuls for this position
         matmul(s_q, s_xb, w_wq + l*dim*dim, dim, dim);
+		// Calculate new KV$, located at s_{key,value}_cache + loff + pos * kv_dim, length = kv_dim(fp32)
         matmul(s_k, s_xb, w_wk + l*dim*kv_dim, dim, kv_dim);
         matmul(s_v, s_xb, w_wv + l*dim*kv_dim, dim, kv_dim);
 
@@ -564,7 +568,9 @@ void forward_mic(
         //#pragma omp barrier
 
         // multihead attention. iterate over all heads
-        #pragma omp parallel for
+        // Should we parallel at here? Threads on MIC is way more than heads 
+        // In practise, for small models, here we should. For large models, here we shouldn't. 
+        #pragma omp parallel for 
         for (int h = 0; h < p_n_heads; h++) {
             // get the query vector for this head
             float* q = s_q + h * head_size;
@@ -576,12 +582,16 @@ void forward_mic(
                 float* k = s_key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
+                // Don't use MKL here, head_size is 64
+				//score = sdot(&head_size, q, &ONE, k, &ONE);
+                
+                #pragma omp simd
                 for (int i = 0; i < head_size; i++) {
                     score += q[i] * k[i];
                 }
-                score /= sqrtf(head_size);
+                
                 // save the score to the attention buffer
-                att[t] = score;
+                att[t] = score / sqrtf(head_size);
             }
 
             // softmax the scores to get attention weights, from 0..pos inclusively
@@ -739,12 +749,14 @@ void forward_cpu(
                 float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
+				score = sdot(&head_size, q, &ONE, k, &ONE);
+                /*
                 for (int i = 0; i < head_size; i++) {
                     score += q[i] * k[i];
                 }
-                score /= sqrtf(head_size);
+                */
                 // save the score to the attention buffer
-                att[t] = score;
+                att[t] = score / sqrtf(head_size);
             }
 
             // softmax the scores to get attention weights, from 0..pos inclusively
@@ -1373,12 +1385,28 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 
             if (offloaded_layers < p_n_layers) {
                 int *sign;
-                #pragma offload target(mic : 0) signal(sign) \
-                    out(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                    out(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                    out(s_att : length(p_n_heads * p_seq_len) alloc_if(0) free_if(0))
-                {}
-                #pragma offload_wait target(mic : 0) wait(sign)
+                // only transmit new KV$. 
+				for (int l = 0; l < offloaded_layers; l++) {
+                    // key and value point to the kv cache
+                    int loff = l * p_seq_len * kv_dim; // kv cache layer offset for convenience
+                    float *s_k = s_key_cache + loff + pos * kv_dim;
+                    float *s_v = s_value_cache + loff + pos * kv_dim;
+
+                    #pragma offload target(mic : 0) signal(sign) \
+                        out(s_k : length(kv_dim) alloc_if(0) free_if(0)) \
+                        out(s_v : length(kv_dim) alloc_if(0) free_if(0)) 
+                    {}
+                    #pragma offload_wait target(mic : 0) wait(sign)
+				}
+                
+                // only transmit new attentions
+                for (int h = 0; h < p_n_heads; h++) {
+                    float *s_att_h = s_att + h * p_seq_len; 
+                    #pragma offload target(mic : 0) signal(sign) \
+                        out(s_att_h : length(pos) alloc_if(0) free_if(0))
+                    {}
+                    #pragma offload_wait target(mic : 0) wait(sign)
+                }
             }
         }
 
