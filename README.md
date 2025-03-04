@@ -8,7 +8,7 @@ I forked this repo to add support of offloading computation to Xeon Phi x100 car
 
 Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
 
-It runs with the 110M model at 24~29 tokens/s when fully offloaded, and the llama2-7b fp32 model at 1.6~1.7 tokens/s when 13 of 32 layers offloaded (native matmul on CPU, IMCI matmul on MIC).
+It runs with the 110M model at 24\~29 tokens/s when fully offloaded, and the llama2-7b fp32 model at 1.6\~1.7 tokens/s when 13 of 32 layers offloaded (native matmul on CPU, IMCI matmul on MIC).
 
 ### Offloading layers
 
