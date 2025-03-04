@@ -8,7 +8,7 @@ I forked this repo to add support of offloading computation to Xeon Phi x100 car
 
 Now it works very well. I've only adapted `run.c` to support Xeon Phi x100 cards, gonna do `runq.c` later. 
 
-It runs the 110M model at ~25 tokens/s when fully offloaded, and the llama2-7b fp32 model at ~1.58 tokens/s with 13 of 32 layers offloaded.
+It runs with the 110M model at 24~29 tokens/s when fully offloaded, and the llama2-7b fp32 model at 1.6~1.7 tokens/s when 13 of 32 layers offloaded (native matmul on CPU, IMCI matmul on MIC).
 
 ### Offloading layers
 
@@ -70,9 +70,9 @@ achieved tok/s: 71.072319
 
 #### MIC
 
-To choose which matmul to run on MIC, use `-N` option (0:naive, 1:mkl, it sets to 1 by default). 
+To choose which matmul to run on MIC, use `-N` option (0:naive, 1:mkl gemm, 2:imci intrinsic, it sets to 2 by default). 
 
-Noticable that the naive implementation is faster than the MKL implementation on small models. But for large models, the MKL implementation is way more faster. By default, it uses the MKL implementation.
+Noticable that the naive implementation is faster than the MKL implementation on small models. But for large models, the MKL implementation is faster, but still slower than the IMCI one. By default, it uses the IMCI implementation.
 
 With `-N 0`, it uses the naive implementation.
 
@@ -130,13 +130,46 @@ Freeing on MIC done
 182 tokens generated in 8.546 s, achieved tok/s: 21.296513
 ```
 
+With `N = 2`, it uses the IMCI Intrinsic implementation. 
+
+```
+PS C:\...\llama2.knc.c> .\llama2.knc.c.run.exe .\stories110M.bin -N 2 -i "Yesterday, " 
+Choosed naive matmul on CPU...
+Choosed IMCI matmul on MIC...
+Tokenizer size: 32000
+Transformer config:
+        model name: .\stories110M.bin
+        n_layers: 12
+        n_heads: 12
+        n_kv_heads: 12
+        dim: 768
+        hidden_dim: 2048
+        seq_len: 1024
+Offloading 12 of 12 layers to MIC
+Steps limit: 256
+Mallocing on MIC
+Mallocing on MIC done
+Yesterday, 3-year-old Billy went to the park with his mom. He saw lots of birds flying around, singing and chirping. He wanted to catch one.
+"Mom, can I catch one?" Billy asked.
+"No, honey," Mom said. "You can't catch a bird."
+But Billy was very persistent. He wanted to catch one. He kept asking and asking.
+Finally, Mom said, "Okay, okay. I'll let you try, but you have to be careful."
+So Billy went around the park and tried to catch a bird. He had to be very quiet and look very carefully. After a few minutes, he finally caught one!
+Billy was so happy. He couldn't believe it. He ran back to his mom and said, "Mom, look at my bird!"
+But when Mom saw it, she said, "That's not a real bird, Billy. It's just a toy."
+Billy was very sad. He had wanted to catch it!
+Freeing on MIC
+Freeing on MIC done
+229 tokens generated in 9.187 s, achieved tok/s: 24.926527
+```
+
 #### Performance
 
-In general, with small models, native ~> AVX2 > MKL. With large models, MKL >> AVX2 > native.
+In general, with small models, native ~> AVX2/IMCI > MKL. With large models, MKL >> AVX2 > native on the host, and IMCI ~> MKL > native on the MIC.
 
 ### Blahblahblah
 
-I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~24 tokens/s to ~20 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s.
+I got MKL worked. But it's interesting that for small models, it's slower than the AVX2 implementation (sometimes even slower than the naive one). But for large models, it's faster. With 110M model fully offloaded, it drops from ~24 tokens/s to ~20 tokens/s. For llama2 7b, 14 layers offloaded, it raises from ~0.65 token/s to ~1.2 tokens/s. More interestingly, the IMCI implementation is faster than the MKL `sgemv`, raises from 1.2 tok/s to 1.7 tok/s. 
 
 **BUT**, with the tiniest 260K model running on the host, MKL runs ~2x faster than the naive one, and the AVX2 one even returns wrong data. Which didn't happen on the Xeon Phi x100 card.
 
@@ -186,13 +219,14 @@ One day, a girly ro. He saw a big wisth was the bluster palownictt. The guround 
 
 It's weird that somehow the AVX2 matmul is faster than the MKL `sgemv` on my AMD R7 2700 host, and the MKL one **does** faster than the naive one on the Xeon Phi x100 card.
 
+And seems by calling `sgemv` directly gives wrong results, idk Y. 
+
 ```c
 // MKL version
 void matmul_mkl(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // Wrong Answers. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
-    //xgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
     // Answers Correct. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
@@ -202,7 +236,6 @@ void matmul_mkl_mic(float* xout, float* x, float* w, int n, int d) {
 	// W (d,n) @ x (n,) -> xout (d,)
     // Wrong Answers. 
     //sgemv(&MATMUL_TRANS, &d, &n, &MATMUL_ALPHA, w, &d, x, &MATMUL_ONE, &MATMUL_BETA, xout, &MATMUL_ONE);
-    //sgemm(&MATMUL_TRANS, &MATMUL_TRANS, &d, &MATMUL_ONE, &n, &MATMUL_ALPHA, w, &d, x, &n, &MATMUL_BETA, xout, &d);
     // Answers Correct. 
     cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n, 1.0f, w, n, x, 1, 0.0f, xout, 1);
 }
