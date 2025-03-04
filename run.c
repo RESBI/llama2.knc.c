@@ -303,6 +303,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     ss = 1.0f / sqrtf(ss);
     
     // Normalize and scale with vectorization
+    /*
     #pragma omp parallel for simd
     //#pragma omp simd
     for (int j = 0; j < size; j+=4) {
@@ -312,18 +313,47 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
         o[j + 3] = weight[j + 3] * (ss * x[j + 3]);
     }
     //#pragma omp barrier
+    */
+
+    __m512 ss_load = _mm512_set1_ps(ss); 
+    int size_aligned = size / 16 * 16; 
+    #pragma omp parallel for
+    //#pragma omp simd
+    for (int j = 0; j < size_aligned; j+=16) {
+        __m512 weight_load = _mm512_load_ps(weight + j); 
+        __m512 x_load = _mm512_load_ps(x + j); 
+
+        x_load = _mm512_mul_ps(ss_load, x_load);
+        x_load = _mm512_mul_ps(weight_load, x_load);
+        _mm512_store_ps(o + j, x_load);  
+    }
+    //#pragma omp barrier
+    // Remains
+    for (int j = size_aligned; j < size; j++) {
+        o[j] = weight[j] * (ss * x[j]);
+    }
 }
 
 TARGET_ATTRIBUTE // MIC attribute
 void softmax(float* x, int size) {
     // find max value (for numerical stability)
 
-    float max_val = x[0];
-    for (int i = 1; i < size; i++) {
+    __m512 max_val_load = _mm512_load_ps(x); 
+    __m512 x_load;
+    int size_aligned = size / 16 * 16; 
+    for (int i = 16; i < size_aligned; i+=16) {
+        x_load = _mm512_load_ps(x + i);
+        // max_val_load[j] = x_load[j] > max_val_load[j] ? x_load[j] : max_val_load[j]; 
+        max_val_load = _mm512_max_ps(max_val_load, x_load); 
+    }
+    float max_val = _mm512_reduce_max_ps(max_val_load); 
+    // remains 
+    for (int i = size_aligned; i < size; i++) {
         if (x[i] > max_val) {
-            max_val = x[i];
+            max_val = x[i]; 
         }
     }
+
     // exp and sum
     float sum = 0.0f;
     #pragma omp parallel for reduction(+:sum)
@@ -334,6 +364,7 @@ void softmax(float* x, int size) {
     }
     //#pragma omp barrier
 
+    // It's not good to do intrinsic here. And unroll with step = 4 is good enough. 
     // normalize
     #pragma omp parallel for simd 
     //#pragma omp simd
@@ -348,39 +379,10 @@ void softmax(float* x, int size) {
 
 #endif
 
-/*
-TARGET_ATTRIBUTE // MIC attribute
-void softmax_mic_serial(float* x, int size) {
-    // find max value (for numerical stability)
-
-    float max_val = x[0];
-    for (int i = 1; i < size; i++) {
-        if (x[i] > max_val) {
-            max_val = x[i];
-        }
-    }
-    // exp and sum
-    float sum = 0.0f;
-    //#pragma omp parallel for reduction(+:sum)
-    for (int i = 0; i < size; i++) {
-        x[i] = expf(x[i] - max_val);
-        sum += x[i];
-    }
-    //#pragma omp barrier
-
-    // normalize
-    #pragma omp simd
-    for (int i = 0; i < size; i++) {
-        x[i] /= sum;
-    }
-    // #pragma omp barrier
-}
-*/
-
 // AVX2 version. Somehow this is faster than the MKL version.
-
+// Credit: https://github.com/trholding/llama2.c/blob/5b2822e1896c72486f38214e8a3cf5fb7c7a84e9/run.c#L413
 void matmul_avx2(float* xout, const float* x, const float* w, int n, int d) {
-    int nn = n / 8 * 8;  // ensure n is a multiple of 8
+    int nn = n / 32 * 32;  // ensure n is a multiple of 8
     int i;
     __m256 sum_vec;
     #pragma omp parallel for private(i, sum_vec)
@@ -427,9 +429,53 @@ void matmul_avx2(float* xout, const float* x, const float* w, int n, int d) {
     }
 }
 
-// matmul_imci_mic is a todo. 
+//IMCI implementation
+
+TARGET_ATTRIBUTE // MIC attribute
+void matmul_imci(float* xout, const float* x, const float* w, int n, int d) {
+    int nn = n / 64 * 64;  // ensure n is a multiple of 16
+    #pragma omp parallel for
+    for (int i = 0; i < d; i++) {
+        __m512 sum_vec = _mm512_setzero_ps(); // for IMCI, sum of 16 floats
+        int i_n = i * n;
+        #pragma omp simd
+        for (int j = 0; j < nn; j += 64) {
+            // Load 64 values from w and x
+            __m512 w_vec0 = _mm512_load_ps(&w[i_n + j]);
+            __m512 w_vec1 = _mm512_load_ps(&w[i_n + j + 16]);
+            __m512 w_vec2 = _mm512_load_ps(&w[i_n + j + 32]);
+            __m512 w_vec3 = _mm512_load_ps(&w[i_n + j + 48]);
+            __m512 x_vec0 = _mm512_load_ps(&x[j]);
+            __m512 x_vec1 = _mm512_load_ps(&x[j + 16]);
+            __m512 x_vec2 = _mm512_load_ps(&x[j + 32]);
+            __m512 x_vec3 = _mm512_load_ps(&x[j + 48]);
+
+            // Multiply and accumulate
+            __m512 prod_vec0 = _mm512_mul_ps(w_vec0, x_vec0);
+            __m512 prod_vec1 = _mm512_mul_ps(w_vec1, x_vec1);
+            __m512 prod_vec2 = _mm512_mul_ps(w_vec2, x_vec2);
+            __m512 prod_vec3 = _mm512_mul_ps(w_vec3, x_vec3);
+            sum_vec = _mm512_add_ps(sum_vec, prod_vec0);
+            sum_vec = _mm512_add_ps(sum_vec, prod_vec1);
+            sum_vec = _mm512_add_ps(sum_vec, prod_vec2);
+            sum_vec = _mm512_add_ps(sum_vec, prod_vec3);
+        }
+
+        // Reduce add to get result
+        float val = _mm512_reduce_add_ps(sum_vec);
+
+        // handle remainder if n is not a multiple of 16
+        int j;
+        #pragma omp simd reduction(+:val)
+        for (j = nn; j < n; j++) {
+            val += w[i_n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
 
 // Naive implementation
+
 void matmul_naive(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -444,6 +490,7 @@ void matmul_naive(float* xout, float* x, float* w, int n, int d) {
     }
     //#pragma omp barrier
 }
+
 
 TARGET_ATTRIBUTE // MIC attribute
 void matmul_naive_mic(float* xout, float* x, float* w, int n, int d) {
@@ -588,10 +635,12 @@ void forward_mic(
                 // get the key vector for this head and at this timestep
                 float* k = s_key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
-                float score = 0.0f;
+
                 // Don't use MKL here, head_size is 64
 				//score = sdot(&head_size, q, &ONE, k, &ONE);
                 
+                /*
+                float score = 0.0f;
                 #pragma omp simd
                 for (int i = 0; i < head_size; i+=4) {
                     score += q[i] * k[i];
@@ -599,7 +648,24 @@ void forward_mic(
                     score += q[i + 2] * k[i + 2];
                     score += q[i + 3] * k[i + 3];
                 }
+                */
                 
+                // Intrinsic
+                int head_size_aligned = head_size / 16 * 16; 
+                __m512 score_load = _mm512_setzero_ps(); 
+                #pragma omp simd
+                for (int i = 0; i < head_size_aligned; i+=16) {
+                    __m512 q_load = _mm512_load_ps(q + i); 
+                    __m512 k_load = _mm512_load_ps(k + i); 
+                    __m512 qk_product = _mm512_mul_ps(q_load, k_load); 
+                    score_load = _mm512_add_ps(score_load, qk_product); 
+                }
+                float score = _mm512_reduce_add_ps(score_load); 
+                // remains
+                for (int i = head_size_aligned; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+
                 // save the score to the attention buffer
                 att[t] = score / sqrtf(head_size);
             }
@@ -645,14 +711,15 @@ void forward_mic(
 
 
         // residual connection back into x
+        // Intrinsic
         #pragma omp parallel for simd 
-        for (int i = 0; i < dim; i+=4) {
-            x[i] += s_xb2[i];
-            x[i + 1] += s_xb2[i + 1];
-            x[i + 2] += s_xb2[i + 2];
-            x[i + 3] += s_xb2[i + 3];
+        for (int i = 0; i < dim; i+=16) {
+            // x[i] += s_xb2[i];
+            __m512 x_load = _mm512_load_ps(x + i); 
+            __m512 s_xb2_load = _mm512_load_ps(s_xb2 + i); 
+            x_load = _mm512_add_ps(x_load, s_xb2_load); 
+            _mm512_store_ps(x + i, x_load); 
         }
-        //#pragma omp barrier
 
         // ffn rmsnorm
         rmsnorm(s_xb, x, w_rms_ffn_weight + l*dim, dim);
@@ -678,14 +745,15 @@ void forward_mic(
         matmul(s_xb, s_hb, w_w2 + l*dim*hidden_dim, hidden_dim, dim);
 
         // residual connection
-        #pragma omp parallel for simd
-        for (int i = 0; i < dim; i+=4) {
-            x[i] += s_xb[i];
-            x[i + 1] += s_xb[i + 1];
-            x[i + 2] += s_xb[i + 2];
-            x[i + 3] += s_xb[i + 3];
+        // Intrinsic
+        #pragma omp parallel for simd 
+        for (int i = 0; i < dim; i+=16) {
+            // x[i] += s_xb[i];
+            __m512 x_load = _mm512_load_ps(x + i); 
+            __m512 s_xb_load = _mm512_load_ps(s_xb + i); 
+            x_load = _mm512_add_ps(x_load, s_xb_load); 
+            _mm512_store_ps(x + i, x_load); 
         }
-        //#pragma omp barrier
     }
     if (offloaded_end == p_n_layers) {
         rmsnorm(x, x, w_rms_final_weight, dim);
@@ -1287,27 +1355,27 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 
         printf("Mallocing on MIC\n");
         #pragma offload target(mic : 0) signal(sign) \
-            nocopy(x : length(dim) alloc_if(1) free_if(0)) \
-            in(w_rms_att_weight : length(offloaded_layers * dim) alloc_if(1) free_if(0)) \
-            in(w_wq : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0)) \
-            in(w_wk : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
-            in(w_wv : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
-            in(w_wo : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0)) \
-            in(w_rms_ffn_weight : length(offloaded_layers*dim) alloc_if(1) free_if(0)) \
-            in(w_w1 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_w2 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_w3 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_rms_final_weight : length(dim) alloc_if(1) free_if(0)) \
-            in(w_wcls : length(dim*p_vocab_size) alloc_if(1) free_if(0)) \
-            nocopy(s_q : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_xb : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_xb2 : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_hb : length(hidden_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_hb2 : length(hidden_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_att : length(p_n_heads * p_seq_len) alloc_if(1) free_if(0)) \
-            nocopy(s_logits : length(p_vocab_size) alloc_if(1) free_if(0))
+            nocopy(x : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_att_weight : length(offloaded_layers * dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wq : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wk : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wv : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wo : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_ffn_weight : length(offloaded_layers*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w1 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w2 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w3 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_final_weight : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wcls : length(dim*p_vocab_size) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_q : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_xb : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_xb2 : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_hb : length(hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_hb2 : length(hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_att : length(p_n_heads * p_seq_len) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_logits : length(p_vocab_size) alloc_if(1) free_if(0) align(ALIGNMENT))
         {}
         #pragma offload_wait target(mic : 0) wait(sign)
         printf("Mallocing on MIC done\n");
@@ -1334,7 +1402,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
                 in(p_n_heads) \
                 in(p_dim) \
                 in(p_vocab_size) \
-                inout(x : length(dim) alloc_if(0) free_if(0)) \
+                inout(x : length(dim) alloc_if(0) free_if(0) align(ALIGNMENT)) \
                 nocopy(w_rms_att_weight : alloc_if(0) free_if(0)) \
                 nocopy(w_wq : alloc_if(0) free_if(0)) \
                 nocopy(w_wk : alloc_if(0) free_if(0)) \
@@ -1362,6 +1430,8 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
                     matmul_mic = matmul_naive_mic;
                 } else if (matmul_selecting_mic == 1) {
                     matmul_mic = matmul_mkl_mic;
+                } else if (matmul_selecting_mic == 2) {
+                    matmul_mic = matmul_imci; 
                 }
 
                 forward_mic(
@@ -1594,27 +1664,27 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 
         printf("Mallocing on MIC\n");
         #pragma offload target(mic : 0) signal(sign) \
-            nocopy(x : length(dim) alloc_if(1) free_if(0)) \
-            in(w_rms_att_weight : length(offloaded_layers * dim) alloc_if(1) free_if(0)) \
-            in(w_wq : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0)) \
-            in(w_wk : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
-            in(w_wv : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0)) \
-            in(w_wo : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0)) \
-            in(w_rms_ffn_weight : length(offloaded_layers*dim) alloc_if(1) free_if(0)) \
-            in(w_w1 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_w2 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_w3 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0)) \
-            in(w_rms_final_weight : length(dim) alloc_if(1) free_if(0)) \
-            in(w_wcls : length(dim*p_vocab_size) alloc_if(1) free_if(0)) \
-            nocopy(s_q : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_xb : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_xb2 : length(dim) alloc_if(1) free_if(0)) \
-            nocopy(s_hb : length(hidden_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_hb2 : length(hidden_dim) alloc_if(1) free_if(0)) \
-            nocopy(s_att : length(p_n_heads * p_seq_len) alloc_if(1) free_if(0)) \
-            nocopy(s_logits : length(p_vocab_size) alloc_if(1) free_if(0))
+            nocopy(x : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_att_weight : length(offloaded_layers * dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wq : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wk : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wv : length(offloaded_layers*dim*kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wo : length(offloaded_layers*dim*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_ffn_weight : length(offloaded_layers*dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w1 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w2 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_w3 : length(offloaded_layers*dim*hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_rms_final_weight : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            in(w_wcls : length(dim*p_vocab_size) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_q : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_xb : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_xb2 : length(dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_hb : length(hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_hb2 : length(hidden_dim) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_att : length(p_n_heads * p_seq_len) alloc_if(1) free_if(0) align(ALIGNMENT)) \
+            nocopy(s_logits : length(p_vocab_size) alloc_if(1) free_if(0) align(ALIGNMENT))
         {}
         #pragma offload_wait target(mic : 0) wait(sign)
         printf("Mallocing on MIC done\n");
@@ -1699,7 +1769,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 in(p_n_heads) \
                 in(p_dim) \
                 in(p_vocab_size) \
-                inout(x : length(dim) alloc_if(0) free_if(0)) \
+                inout(x : length(dim) alloc_if(0) free_if(0) align(ALIGNMENT)) \
                 nocopy(w_rms_att_weight : alloc_if(0) free_if(0)) \
                 nocopy(w_wq : alloc_if(0) free_if(0)) \
                 nocopy(w_wk : alloc_if(0) free_if(0)) \
@@ -1727,6 +1797,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                     matmul_mic = matmul_naive_mic;
                 } else if (matmul_selecting_mic == 1) {
                     matmul_mic = matmul_mkl_mic;
+                } else if (matmul_selecting_mic == 2) {
+                    matmul_mic = matmul_imci; 
                 }
 
                 forward_mic(
@@ -1773,12 +1845,28 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 
             if (offloaded_layers < p_n_layers) {
                 int *sign;
-                #pragma offload target(mic : 0) signal(sign) \
-                    out(s_key_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                    out(s_value_cache : length(offloaded_layers * p_seq_len * kv_dim) alloc_if(0) free_if(0)) \
-                    out(s_att : length(p_n_heads * p_seq_len) alloc_if(0) free_if(0))
-                {}
-                #pragma offload_wait target(mic : 0) wait(sign)
+                // only transmit new KV$. 
+				for (int l = 0; l < offloaded_layers; l++) {
+                    // key and value point to the kv cache
+                    int loff = l * p_seq_len * kv_dim; // kv cache layer offset for convenience
+                    float *s_k = s_key_cache + loff + pos * kv_dim;
+                    float *s_v = s_value_cache + loff + pos * kv_dim;
+
+                    #pragma offload target(mic : 0) signal(sign) \
+                        out(s_k : length(kv_dim) alloc_if(0) free_if(0)) \
+                        out(s_v : length(kv_dim) alloc_if(0) free_if(0)) 
+                    {}
+                    //#pragma offload_wait target(mic : 0) wait(sign)
+				}
+                
+                // only transmit new attentions
+                for (int h = 0; h < p_n_heads; h++) {
+                    float *s_att_h = s_att + h * p_seq_len; 
+                    #pragma offload target(mic : 0) signal(sign) \
+                        out(s_att_h : length(pos) alloc_if(0) free_if(0))
+                    {}
+                    #pragma offload_wait target(mic : 0) wait(sign)
+                }
             }
         }
         // forward the transformer to get logits for the next token
@@ -1861,7 +1949,7 @@ void error_usage() {
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
     fprintf(stderr, "  -M <int> choose Matmul function on CPU: 0:naive|1:mkl|2:avx2, default: 0\n");
-    fprintf(stderr, "  -N <int> choose Matmul function on MIC: 0:naive|1:mkl, default: 1\n");
+    fprintf(stderr, "  -N <int> choose Matmul function on MIC: 0:naive|1:mkl|2:imci, default: 1\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1880,7 +1968,7 @@ int main(int argc, char *argv[]) {
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
     int offloaded_layers = -1;
     int matmul_selecting_cpu = 0;
-	int matmul_selecting_mic = 1; 
+	int matmul_selecting_mic = 2; 
 
     // poor man's C argparse so we can override the defaults above from the command line
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
@@ -1919,7 +2007,9 @@ int main(int argc, char *argv[]) {
         printf("Choosed naive matmul on MIC...\n");
     } else if (matmul_selecting_mic == 1) {
         printf("Choosed MKL matmul on MIC...\n");
-    }
+	} else if (matmul_selecting_mic == 2) { 
+        printf("Choosed IMCI matmul on MIC...\n"); 
+	}
 
 
     // parameter validation/overrides
