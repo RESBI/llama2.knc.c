@@ -305,8 +305,11 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     // Normalize and scale with vectorization
     #pragma omp parallel for simd
     //#pragma omp simd
-    for (int j = 0; j < size; j++) {
+    for (int j = 0; j < size; j+=4) {
         o[j] = weight[j] * (ss * x[j]);
+        o[j + 1] = weight[j + 1] * (ss * x[j + 1]);
+        o[j + 2] = weight[j + 2] * (ss * x[j + 2]);
+        o[j + 3] = weight[j + 3] * (ss * x[j + 3]);
     }
     //#pragma omp barrier
 }
@@ -334,8 +337,11 @@ void softmax(float* x, int size) {
     // normalize
     #pragma omp parallel for simd 
     //#pragma omp simd
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < size; i+=4) {
         x[i] /= sum;
+        x[i + 1] /= sum;
+        x[i + 2] /= sum;
+        x[i + 3] /= sum;
     }
     //#pragma omp barrier
 }
@@ -577,6 +583,7 @@ void forward_mic(
             // attention scores for this head
             float* att = s_att + h * p_seq_len;
             // iterate over all timesteps, including the current one
+            //#pragma omp parallel for
             for (int t = 0; t <= pos; t++) {
                 // get the key vector for this head and at this timestep
                 float* k = s_key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -586,8 +593,11 @@ void forward_mic(
 				//score = sdot(&head_size, q, &ONE, k, &ONE);
                 
                 #pragma omp simd
-                for (int i = 0; i < head_size; i++) {
+                for (int i = 0; i < head_size; i+=4) {
                     score += q[i] * k[i];
+                    score += q[i + 1] * k[i + 1];
+                    score += q[i + 2] * k[i + 2];
+                    score += q[i + 3] * k[i + 3];
                 }
                 
                 // save the score to the attention buffer
@@ -606,8 +616,11 @@ void forward_mic(
             float a = att[0];
             // accumulate the weighted value into xb
             #pragma omp simd
-            for (int i = 0; i < head_size; i++) {
+            for (int i = 0; i < head_size; i+=4) {
                 xb[i] = a * v[i];
+                xb[i + 1] = a * v[i + 1];
+                xb[i + 2] = a * v[i + 2];
+                xb[i + 3] = a * v[i + 3];
             }
             // t = 1..pos
             for (int t = 1; t <= pos; t++) {
@@ -617,8 +630,11 @@ void forward_mic(
                 a = att[t];
                 // accumulate the weighted value into xb
                 #pragma omp simd
-                for (int i = 0; i < head_size; i++) {
+                for (int i = 0; i < head_size; i+=4) {
                     xb[i] += a * v[i];
+                    xb[i + 1] += a * v[i + 1];
+                    xb[i + 2] += a * v[i + 2];
+                    xb[i + 3] += a * v[i + 3];
                 }
             }
         }
@@ -630,8 +646,11 @@ void forward_mic(
 
         // residual connection back into x
         #pragma omp parallel for simd 
-        for (int i = 0; i < dim; i++) {
+        for (int i = 0; i < dim; i+=4) {
             x[i] += s_xb2[i];
+            x[i + 1] += s_xb2[i + 1];
+            x[i + 2] += s_xb2[i + 2];
+            x[i + 3] += s_xb2[i + 3];
         }
         //#pragma omp barrier
 
@@ -660,8 +679,11 @@ void forward_mic(
 
         // residual connection
         #pragma omp parallel for simd
-        for (int i = 0; i < dim; i++) {
+        for (int i = 0; i < dim; i+=4) {
             x[i] += s_xb[i];
+            x[i + 1] += s_xb[i + 1];
+            x[i + 2] += s_xb[i + 2];
+            x[i + 3] += s_xb[i + 3];
         }
         //#pragma omp barrier
     }
@@ -744,6 +766,7 @@ void forward_cpu(
             // attention scores for this head
             float* att = s->att + h * p->seq_len;
             // iterate over all timesteps, including the current one
+            //#pragma omp parallel for
             for (int t = 0; t <= pos; t++) {
                 // get the key vector for this head and at this timestep
                 float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -1396,7 +1419,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
                         out(s_k : length(kv_dim) alloc_if(0) free_if(0)) \
                         out(s_v : length(kv_dim) alloc_if(0) free_if(0)) 
                     {}
-                    #pragma offload_wait target(mic : 0) wait(sign)
+                    //#pragma offload_wait target(mic : 0) wait(sign)
 				}
                 
                 // only transmit new attentions
@@ -1418,7 +1441,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
             #pragma offload target(mic : 0) signal(sign) \
                 out(s_logits : length(p_vocab_size) alloc_if(0) free_if(0))
             {}
-            #pragma offload_wait target(mic : 0) wait(sign)
+            //#pragma offload_wait target(mic : 0) wait(sign)
         }
         float* logits = transformer->state.logits;
 
